@@ -78,7 +78,6 @@ void nrd::InstanceImpl::Add_ReblurDiffuseSpecularSh(DenoiserData& denoiserData) 
     AddTextureToTransientPool({REBLUR_FORMAT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT_FAST_HISTORY, 1});
     AddTextureToTransientPool({REBLUR_FORMAT, 1});
-    AddTextureToTransientPool({REBLUR_FORMAT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT_TILES, 16});
 
     std::array<ShaderMake::ShaderConstant, 2> commonDefines = {{
