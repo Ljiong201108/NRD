@@ -35,6 +35,21 @@ float2 StochasticBilinear( float2 uv, float2 texSize )
     #endif
 }
 
+float GetLowRoughnessSpatialWeight( int2 pos, float materialID, float3 N, float roughness, float viewZ )
+{
+    float zs = UnpackViewZ( gIn_ViewZ[ WithRectOrigin( pos ) ] );
+    float materialIDs;
+    float4 Ns = NRD_FrontEnd_UnpackNormalAndRoughness(
+        gIn_Normal_Roughness[ WithRectOrigin( pos ) ], materialIDs );
+    float relativeDepth = abs( zs - viewZ ) / max( min( zs, viewZ ), 0.1 );
+    float w = CompareMaterials( materialID, materialIDs, gSpecMinMaterial );
+    w *= Math::SmoothStep( 0.95, 0.995, dot( Ns.xyz, N ) );
+    w *= 1.0 - Math::SmoothStep( 0.02, 0.08, abs( Ns.w - roughness ) );
+    w *= 1.0 - Math::SmoothStep( 0.005, 0.03, relativeDepth );
+
+    return w * float( zs < gDenoisingRange );
+}
+
 void Preload( uint2 sharedPos, int2 globalPos )
 {
     globalPos = clamp( globalPos, 0, gRectSizeMinusOne );
@@ -120,6 +135,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float3 N = normalAndRoughness.xyz;
     float roughness = normalAndRoughness.w;
     bool lowRoughnessSurfaceGuide = materialID < 0.5 || ( materialID > 1.5 && materialID < 2.5 );
+    bool opaqueLowRoughness = materialID < 0.5 && roughness <= 0.12;
     float guidedSpecularRoughnessLimit = materialID > 1.5 ? 0.45 : 0.12;
 
     #if( NRD_SPEC )
@@ -385,6 +401,33 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         #endif
 
         REBLUR_TYPE spec = gIn_Spec[ specPos ];
+
+        #if( NRD_MODE != OCCLUSION )
+            if( gEnableLowRoughnessSpecularStabilization != 0 && opaqueLowRoughness )
+            {
+                float3 spatialSpec = spec.xyz;
+                float spatialWeightSum = 1.0;
+
+                [unroll]
+                for( j = -1; j <= 1; j++ )
+                {
+                    [unroll]
+                    for( i = -1; i <= 1; i++ )
+                    {
+                        if( i == 0 && j == 0 )
+                            continue;
+
+                        int2 pos = clamp( int2( pixelPos ) + int2( i, j ), 0, gRectSizeMinusOne );
+                        float w = GetLowRoughnessSpatialWeight( pos, materialID, N, roughness, viewZ );
+                        REBLUR_TYPE s = gIn_Spec[ pos ];
+                        spatialSpec += s.xyz * w;
+                        spatialWeightSum += w;
+                    }
+                }
+
+                spec.xyz = spatialSpec / spatialWeightSum;
+            }
+        #endif
 
         // Checkerboard resolve // TODO: materialID support?
         #if( NRD_MODE == OCCLUSION )
@@ -746,8 +789,9 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             float vmbFailure = Math::SmoothStep( 0.15, 0.80, 1.0 - virtualHistoryConfidence );
             lowRoughnessSurfaceFallback = motion * vmbFailure;
 
+            float fallbackFrameNum = materialID > 1.5 ? 10.0 : 6.0;
             surfaceHistoryConfidence = max( surfaceHistoryConfidence,
-                lowRoughnessSurfaceFallback * ( 10.0 / max( gMaxAccumulatedFrameNum, 1.0 ) ) );
+                lowRoughnessSurfaceFallback * ( fallbackFrameNum / max( gMaxAccumulatedFrameNum, 1.0 ) ) );
         }
 
         // Limit number of accumulated frames
@@ -839,6 +883,29 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
         #if( NRD_MODE == SH )
             REBLUR_SH_TYPE specSh = gIn_SpecSh[ specPos ];
+            if( gEnableLowRoughnessSpecularStabilization != 0 && opaqueLowRoughness )
+            {
+                float3 spatialSpecSh = specSh.xyz;
+                float spatialWeightSum = 1.0;
+
+                [unroll]
+                for( j = -1; j <= 1; j++ )
+                {
+                    [unroll]
+                    for( i = -1; i <= 1; i++ )
+                    {
+                        if( i == 0 && j == 0 )
+                            continue;
+
+                        int2 pos = clamp( int2( pixelPos ) + int2( i, j ), 0, gRectSizeMinusOne );
+                        float w = GetLowRoughnessSpatialWeight( pos, materialID, N, roughness, viewZ );
+                        spatialSpecSh += gIn_SpecSh[ pos ].xyz * w;
+                        spatialWeightSum += w;
+                    }
+                }
+
+                specSh.xyz = spatialSpecSh / spatialWeightSum;
+            }
             REBLUR_SH_TYPE specShResult = lerp( specShHistory, specSh, specNonLinearAccumSpeed );
         #endif
 
@@ -851,7 +918,8 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         #if( NRD_MODE != OCCLUSION && NRD_MODE != DO )
         {
             float specLumaResult = GetLuma( specResult );
-            float specLumaClamped = min( specLumaResult, GetLuma( specHistory ) * specMaxRelativeIntensity );
+            float specFireflyUpper = GetLuma( specHistory ) * specMaxRelativeIntensity;
+            float specLumaClamped = min( specLumaResult, specFireflyUpper );
             specLumaClamped = lerp( specLumaResult, specLumaClamped, specAntifireflyFactor );
 
             specResult = ChangeLuma( specResult, specLumaClamped );
@@ -989,7 +1057,11 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             diffAntifireflyFactor /= 1.0 + diffAntifireflyFactor;
 
             float diffLumaResult = GetLuma( diffResult );
-            float diffLumaClamped = min( diffLumaResult, GetLuma( diffHistory ) * diffMaxRelativeIntensity );
+            float diffHistoryLuma = GetLuma( diffHistory );
+            float temporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
+            float diffFireflyUpper = max( diffHistoryLuma * diffMaxRelativeIntensity,
+                                          diffHistoryLuma + 0.016 * temporalFrameScale );
+            float diffLumaClamped = min( diffLumaResult, diffFireflyUpper );
             diffLumaClamped = lerp( diffLumaResult, diffLumaClamped, diffAntifireflyFactor );
 
             diffResult = ChangeLuma( diffResult, diffLumaClamped );
@@ -1019,7 +1091,9 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
             #if( NRD_MODE != OCCLUSION && NRD_MODE != DO )
                 // Firefly suppressor ( fixes heavy crawling under camera rotation, test 99 )
-                float diffFastClamped = min( diffFastResult, GetLuma( diffHistory ) * diffMaxRelativeIntensity * REBLUR_FIREFLY_SUPPRESSOR_FAST_RELATIVE_INTENSITY );
+                float diffFastUpper = max( diffHistoryLuma * diffMaxRelativeIntensity * REBLUR_FIREFLY_SUPPRESSOR_FAST_RELATIVE_INTENSITY,
+                                           diffHistoryLuma + 0.016 * temporalFrameScale );
+                float diffFastClamped = min( diffFastResult, diffFastUpper );
                 diffFastResult = lerp( diffFastResult, diffFastClamped, diffAntifireflyFactor );
             #endif
 

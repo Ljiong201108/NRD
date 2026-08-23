@@ -149,6 +149,11 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
         // Compute antilag
         float diffAntilag = ComputeAntilag( smbDiffLumaHistory, diffLumaM1, diffLumaSigma, smbFootprintQuality * data1.x );
+        float diffCoherentDelta = max( abs( diffLumaM1 - smbDiffLumaHistory ) - diffLumaSigma, 0.0 );
+        float diffCoherentChange = Math::SmoothStep( 0.03, 0.14,
+            diffCoherentDelta / max( max( diffLumaM1, smbDiffLumaHistory ) + diffLumaSigma, 0.002 ) );
+        if( materialID < 0.5 && roughness > 0.12 )
+            diffAntilag *= lerp( 1.0, 0.4, diffCoherentChange );
 
         // Clamp history and combine with the current frame
         float2 diffTemporalAccumulationParams = GetTemporalAccumulationParams( smbFootprintQuality, data1.x );
@@ -361,17 +366,23 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
                 float maxLogRise = transparentGlossy ?
                     lerp( 0.18, 0.07, motionStrength ) : lerp( 0.14, 0.05, motionStrength );
-                float absoluteAllowance = transparentGlossy ? 0.00035 : 0.0015;
+                float absoluteAllowance = transparentGlossy ? 0.00035 : 0.0035;
                 float temporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
                 maxLogRise *= temporalFrameScale;
                 absoluteAllowance *= temporalFrameScale;
                 float temporalUpper = max( specLumaRiseReference * exp2( maxLogRise ),
                                            specLumaRiseReference + absoluteAllowance );
                 float localRiseSupport = max( specLumaM1 - specLumaSigma * 0.75, 0.0 );
-                if( transparentGlossy )
-                    temporalUpper = max( temporalUpper, localRiseSupport );
+                temporalUpper = max( temporalUpper, localRiseSupport );
 
                 specLumaStabilized = min( specLumaStabilized, temporalUpper );
+            }
+
+            if( opaqueLowRoughness )
+            {
+                float localFallUpper = specLumaM1 + specLumaSigma + 0.002;
+                if( specLumaRiseReference > localFallUpper )
+                    specLumaStabilized = min( specLumaStabilized, max( specLuma, localFallUpper ) );
             }
         }
 

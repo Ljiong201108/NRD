@@ -242,7 +242,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float diffLuma = GetLuma( diff );
 
         // Anti-firefly
-        if( gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 )
+        if( gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 && ( materialID >= 0.5 || roughness <= 0.12 ) )
         {
             float m1 = 0;
             float m2 = 0;
@@ -282,6 +282,8 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float diffMax = diffM1 + diffSigma;
 
         float diffLumaClamped = clamp( diffLuma, diffMin, diffMax );
+        if( materialID < 0.5 && roughness > 0.12 )
+            diffLumaClamped = diffLuma;
         diffLuma = lerp( diffLumaClamped, diffLuma, 1.0 / ( 1.0 + float( gMaxFastAccumulatedFrameNum < gMaxAccumulatedFrameNum ) * frameNum.x * 2.0 ) );
 
         // Change luma
@@ -315,7 +317,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float robustLowHistorySpecularStrength = 0.0;
         bool transparentLowRoughness = materialID > 0.5 && materialID < 2.5 && roughness <= 0.45;
         bool opaqueLowRoughness = materialID < 0.5 && roughness <= 0.12;
-        if( gEnableLowRoughnessSpecularStabilization != 0 && ( transparentLowRoughness || opaqueLowRoughness ) )
+        if( gEnableLowRoughnessSpecularStabilization != 0 && transparentLowRoughness )
         {
             robustLowHistorySpecularStrength = saturate( 1.0 - frameNum.y / 24.0 );
         }
@@ -445,8 +447,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             {
                 float robustLuma = exp2( robustLogLumaSum / robustWeightSum );
                 float linearLuma = GetLuma( spec );
-                float robustUpper = robustLuma * ( transparentLowRoughness ? 1.20 : 1.08 );
-                robustUpper += transparentLowRoughness ? 0.0002 : 0.002;
+                float robustUpper = robustLuma * 1.20 + 0.0002;
                 float filteredLuma = lerp( linearLuma, min( linearLuma, robustUpper ),
                                            robustLowHistorySpecularStrength );
                 spec = ChangeLuma( spec, filteredLuma );
@@ -484,7 +485,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float specLuma = GetLuma( spec );
 
         // Anti-firefly
-        if( gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 )
+        if( gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 && !opaqueLowRoughness )
         {
             float m1 = 0;
             float m2 = 0;
@@ -514,16 +515,14 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             m1 *= invNorm;
             m2 *= invNorm;
 
-            float sigmaScale = useRobustLowHistorySpecular ?
-                ( transparentLowRoughness ? 0.45 : 0.55 ) : REBLUR_ANTI_FIREFLY_SIGMA_SCALE;
+            float sigmaScale = useRobustLowHistorySpecular ? 0.45 : REBLUR_ANTI_FIREFLY_SIGMA_SCALE;
             float sigma = GetStdDev( m1, m2 ) * sigmaScale;
             if( useRobustLowHistorySpecular )
             {
                 float ringUpper = exp2( m1 + sigma );
                 float neighborMean = max( ( specM1 - specCenter ) /
                     ( ( BORDER * 2 + 1 ) * ( BORDER * 2 + 1 ) - 1 ), 0.0 );
-                float coherentUpper = neighborMean * ( transparentLowRoughness ? 1.30 : 1.15 );
-                coherentUpper += transparentLowRoughness ? 0.0002 : 0.002;
+                float coherentUpper = neighborMean * 1.30 + 0.0002;
                 float filteredLuma = min( specLuma, max( ringUpper, coherentUpper ) );
                 specLuma = lerp( specLuma, filteredLuma, robustLowHistorySpecularStrength );
             }
@@ -544,6 +543,8 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float specMax = specM1 + specSigma;
 
         float specLumaClamped = clamp( specLuma, specMin, specMax );
+        if( opaqueLowRoughness )
+            specLumaClamped = specLuma;
         specLuma = lerp( specLumaClamped, specLuma, 1.0 / ( 1.0 + float( gMaxFastAccumulatedFrameNum < gMaxAccumulatedFrameNum ) * frameNum.y * 2.0 ) );
 
         // Change luma
