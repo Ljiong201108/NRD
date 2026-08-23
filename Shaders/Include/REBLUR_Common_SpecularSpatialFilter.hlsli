@@ -81,6 +81,18 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
         // Blur radius - addition to avoid underblurring
         blurRadius = max( blurRadius, gMinBlurRadius * smc );
 
+    #if( REBLUR_SPATIAL_MODE != REBLUR_PRE_BLUR )
+        bool transparentGlossyStabilization = materialID > 0.5 && materialID < 2.5 && roughness <= 0.45;
+        bool opaqueLowRoughnessStabilization = materialID < 0.5 && roughness <= 0.12;
+        float glossyHistoryDeficit = 0.0;
+        if( gEnableLowRoughnessSpecularStabilization != 0 && ( transparentGlossyStabilization || opaqueLowRoughnessStabilization ) )
+        {
+            glossyHistoryDeficit = saturate( 1.0 - data1.y / max( 6.0 * gFramerateScale, 1.0 ) );
+            float minRadiusScale = transparentGlossyStabilization ? 2.0 : 3.0;
+            blurRadius = max( blurRadius, gMinBlurRadius * lerp( 1.0, minRadiusScale, glossyHistoryDeficit ) );
+        }
+    #endif
+
         // Weights
         float roughnessFractionScaled = saturate( gRoughnessFraction * fractionScale );
         float2 geometryWeightParams = GetGeometryWeightParams( gPlaneDistSensitivity, frustumSize, Xv, Nv, specNonLinearAccumSpeed );
@@ -89,6 +101,11 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 
         float2 hitDistanceWeightParams = GetHitDistanceWeightParams( ExtractHitDist( spec ), specNonLinearAccumSpeed, roughness ); // TODO: what if hitT == 0?
         float minHitDistWeight = gMinHitDistanceWeight * fractionScale * smc;
+
+    #if( REBLUR_SPATIAL_MODE != REBLUR_PRE_BLUR )
+        float relaxedMinHitDistWeight = transparentGlossyStabilization ? 0.20 : 0.35;
+        minHitDistWeight = max( minHitDistWeight, glossyHistoryDeficit * relaxedMinHitDistWeight );
+    #endif
 
         // ( Optional ) Gradually reduce "minHitDistWeight" to preserve contact details
     #if( REBLUR_SPATIAL_MODE != REBLUR_PRE_BLUR && NRD_MODE != REBLUR_OCCLUSION )

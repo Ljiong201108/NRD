@@ -119,6 +119,8 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float4 normalAndRoughness = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ WithRectOrigin( pixelPos ) ], materialID );
     float3 N = normalAndRoughness.xyz;
     float roughness = normalAndRoughness.w;
+    bool lowRoughnessSurfaceGuide = materialID < 0.5 || ( materialID > 1.5 && materialID < 2.5 );
+    float guidedSpecularRoughnessLimit = materialID > 1.5 ? 0.45 : 0.12;
 
     #if( NRD_SPEC )
         // Modified roughness is essential for "smb" specular motion
@@ -325,6 +327,28 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float smbFootprintQuality = Filtering::ApplyBilinearFilter( smbOcclusion0.z, smbOcclusion1.y, smbOcclusion2.y, smbOcclusion3.x, smbBilinearFilter );
     smbFootprintQuality = Math::Sqrt01( smbFootprintQuality );
     smbFootprintQuality *= sizeQuality; // avoid footprint momentary stretching due to changed viewing angle
+
+    #if( NRD_SPEC )
+        if( gEnableLowRoughnessSpecularStabilization != 0 && lowRoughnessSurfaceGuide && roughness <= guidedSpecularRoughnessLimit && smbFootprintQuality > 0.25 )
+        {
+            float previousHitDistForTracking = gPrev_SpecHitDistForTracking.SampleLevel( gLinearClamp, smbPixelUv * gResolutionScalePrev, 0 );
+            if( hitDistForTracking > NRD_EPS && previousHitDistForTracking > NRD_EPS )
+            {
+                float motion = Math::SmoothStep( 0.5, 6.0, smbParallaxInPixelsMax );
+                float previousLogHitDist = log2( previousHitDistForTracking );
+                float currentLogHitDist = log2( hitDistForTracking );
+                float temporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
+                float maxLogStep = lerp( 0.75, 0.30, motion ) * temporalFrameScale;
+                float boundedLogHitDist = clamp( currentLogHitDist, previousLogHitDist - maxLogStep, previousLogHitDist + maxLogStep );
+                float currentWeight = lerp( 0.55, 0.35, motion );
+                currentWeight = 1.0 - pow( 1.0 - currentWeight, temporalFrameScale );
+                float trackedLogHitDist = lerp( previousLogHitDist, boundedLogHitDist, currentWeight );
+                currentLogHitDist = lerp( currentLogHitDist, trackedLogHitDist, smbFootprintQuality );
+                hitDistForTracking = exp2( currentLogHitDist );
+                gOut_SpecHitDistForTracking[ pixelPos ] = hitDistForTracking;
+            }
+        }
+    #endif
 
     // Checkerboard resolve
     uint checkerboard = Sequence::CheckerBoard( pixelPos, gFrameIndex );
@@ -716,7 +740,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         }
 
         float lowRoughnessSurfaceFallback = 0.0;
-        if( gEnableLowRoughnessSpecularStabilization != 0 && materialID < 0.5 && roughness <= 0.12 )
+        if( gEnableLowRoughnessSpecularStabilization != 0 && lowRoughnessSurfaceGuide && roughness <= guidedSpecularRoughnessLimit )
         {
             float motion = Math::SmoothStep( 1.0, 6.0, smbParallaxInPixelsMax );
             float vmbFailure = Math::SmoothStep( 0.15, 0.80, 1.0 - virtualHistoryConfidence );

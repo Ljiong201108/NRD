@@ -916,6 +916,32 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float3 accumulatedSpecularIllumination = lerp(accumulatedSpecularSMB.xyz, accumulatedSpecularVMB.xyz, virtualHistoryAmount);
     float3 accumulatedSpecularIlluminationResponsive = lerp(accumulatedSpecularSMBResponsive.xyz, accumulatedSpecularVMBResponsive.xyz, virtualHistoryAmount);
     float accumulatedSpecular2ndMoment = lerp(accumulatedSpecularM2SMB, accumulatedSpecularM2VMB, virtualHistoryAmount);
+    float terminalSpecularScale = 1.0;
+    float terminalSpecularResponsiveScale = 1.0;
+    bool terminalTransparentGlossy = currentMaterialID > 1.5 && currentMaterialID < 2.5 && currentRoughness <= 0.45;
+    if( terminalTransparentGlossy && max( SMBReprojectionFound, VMBReprojectionFound ) > 0.0 )
+    {
+        float historyLuminance = 0.0;
+        if( SMBReprojectionFound > 0.0 )
+            historyLuminance = max( historyLuminance, Color::Luminance( prevSpecularIlluminationAnd2ndMomentSMB.rgb ) );
+        if( VMBReprojectionFound > 0.0 )
+            historyLuminance = max( historyLuminance, Color::Luminance( prevSpecularIlluminationAnd2ndMomentVMB.rgb ) );
+
+        float motionStrength = Math::SmoothStep( 0.25, 2.0, smbParallaxInPixelsMax );
+        float maxLogRise = lerp( 0.16, 0.06, motionStrength );
+        float absoluteAllowance = lerp( 0.0005, 0.0003, motionStrength );
+        float temporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
+        maxLogRise *= temporalFrameScale;
+        absoluteAllowance *= temporalFrameScale;
+        float temporalUpper = max( historyLuminance * exp2( maxLogRise ), historyLuminance + absoluteAllowance );
+        float accumulatedLuminance = Color::Luminance( accumulatedSpecularIllumination );
+        float responsiveLuminance = Color::Luminance( accumulatedSpecularIlluminationResponsive );
+        terminalSpecularScale = min( 1.0, temporalUpper / max( accumulatedLuminance, NRD_EPS ) );
+        terminalSpecularResponsiveScale = min( 1.0, temporalUpper / max( responsiveLuminance, NRD_EPS ) );
+        accumulatedSpecularIllumination *= terminalSpecularScale;
+        accumulatedSpecularIlluminationResponsive *= terminalSpecularResponsiveScale;
+        accumulatedSpecular2ndMoment *= terminalSpecularScale * terminalSpecularScale;
+    }
 
     #if( NRD_MODE == SH )
         float4 accumulatedSpecularSMBSH = lerp(prevSpecularSMBSH, specularSH, specSMBAlpha);
@@ -926,6 +952,8 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
         float4 accumulatedSpecularSH = lerp(accumulatedSpecularSMBSH, accumulatedSpecularVMBSH, virtualHistoryAmount);
         float4 accumulatedSpecularResponsiveSH = lerp(accumulatedSpecularSMBResponsiveSH, accumulatedSpecularVMBResponsiveSH, virtualHistoryAmount);
+        accumulatedSpecularSH.rgb *= terminalSpecularScale;
+        accumulatedSpecularResponsiveSH.rgb *= terminalSpecularResponsiveScale;
         gOut_SpecSh[pixelPos] = float4(accumulatedSpecularSH.rgb, currentRoughnessModified);
         gOut_SpecShFast[pixelPos] = accumulatedSpecularResponsiveSH;
     #endif

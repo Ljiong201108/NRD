@@ -312,7 +312,9 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float specLumaHistory = lerp( smbSpecLumaHistory, vmbSpecLumaHistory, virtualHistoryAmount );
         float specLumaHistoryUnclamped = specLumaHistory;
         float specLumaRiseReference = specLumaHistoryUnclamped;
-        if( vmbFootprintQuality > 0.5 )
+        if( smbFootprintQuality > 0.25 )
+            specLumaRiseReference = max( specLumaRiseReference, smbSpecLumaHistory );
+        if( vmbFootprintQuality > 0.25 )
             specLumaRiseReference = max( specLumaRiseReference, vmbSpecLumaHistory );
         float footprintQuality = lerp( smbFootprintQuality, vmbFootprintQuality, virtualHistoryAmount );
 
@@ -343,21 +345,31 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
         float specLumaStabilized = lerp( specLuma, specLumaHistory, min( specHistoryWeight, gStabilizationStrength ) );
 
-        if( gEnableLowRoughnessSpecularStabilization != 0 && materialID < 0.5 && roughness <= 0.12 )
+        bool transparentGlossy = materialID > 0.5 && materialID < 2.5 && roughness <= 0.45;
+        bool opaqueLowRoughness = materialID < 0.5 && roughness <= 0.12;
+        if( gEnableLowRoughnessSpecularStabilization != 0 && ( transparentGlossy || opaqueLowRoughness ) )
         {
-            float historyValidity = footprintQuality * float( data1.y >= 1.0 );
+            float smbHistoryValidity = smbFootprintQuality * float( smbPixelUv.x >= gSplitScreenPrev );
+            float vmbHistoryValidity = vmbFootprintQuality * float( vmbPixelUv.x >= gSplitScreenPrev );
+            float historyValidity = max( smbHistoryValidity, vmbHistoryValidity ) * float( data1.y >= 1.0 );
             historyValidity *= float( pixelUv.x >= gSplitScreen );
-            historyValidity *= virtualHistoryAmount != 1.0 ? float( smbPixelUv.x >= gSplitScreenPrev ) : 1.0;
-            historyValidity *= virtualHistoryAmount != 0.0 ? float( vmbPixelUv.x >= gSplitScreenPrev ) : 1.0;
 
             if( historyValidity > 0.25 && specLumaStabilized > specLumaRiseReference )
             {
                 float motionInPixels = length( ( smbPixelUv - pixelUv ) * gRectSize );
                 float motionStrength = Math::SmoothStep( 0.25, 2.0, motionInPixels );
 
-                float maxLogRise = lerp( 0.24, 0.10, motionStrength );
-                float historyLogLuma = log2( 1.0 + max( specLumaRiseReference, 0.0 ) );
-                float temporalUpper = exp2( historyLogLuma + maxLogRise ) - 1.0;
+                float maxLogRise = transparentGlossy ?
+                    lerp( 0.18, 0.07, motionStrength ) : lerp( 0.14, 0.05, motionStrength );
+                float absoluteAllowance = transparentGlossy ? 0.00035 : 0.0015;
+                float temporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
+                maxLogRise *= temporalFrameScale;
+                absoluteAllowance *= temporalFrameScale;
+                float temporalUpper = max( specLumaRiseReference * exp2( maxLogRise ),
+                                           specLumaRiseReference + absoluteAllowance );
+                float localRiseSupport = max( specLumaM1 - specLumaSigma * 0.75, 0.0 );
+                if( transparentGlossy )
+                    temporalUpper = max( temporalUpper, localRiseSupport );
 
                 specLumaStabilized = min( specLumaStabilized, temporalUpper );
             }

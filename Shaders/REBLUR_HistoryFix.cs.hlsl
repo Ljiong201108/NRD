@@ -313,9 +313,11 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float smc = GetSpecMagicCurve( roughness );
         float specNonLinearAccumSpeed = 1.0 / ( 1.0 + frameNum.y );
         float robustLowHistorySpecularStrength = 0.0;
-        if( gEnableLowRoughnessSpecularStabilization != 0 && materialID < 0.5 && roughness <= 0.12 )
+        bool transparentLowRoughness = materialID > 0.5 && materialID < 2.5 && roughness <= 0.45;
+        bool opaqueLowRoughness = materialID < 0.5 && roughness <= 0.12;
+        if( gEnableLowRoughnessSpecularStabilization != 0 && ( transparentLowRoughness || opaqueLowRoughness ) )
         {
-            robustLowHistorySpecularStrength = saturate( 1.0 - frameNum.y / 18.0 );
+            robustLowHistorySpecularStrength = saturate( 1.0 - frameNum.y / 24.0 );
         }
         bool useRobustLowHistorySpecular = robustLowHistorySpecularStrength > 0.0;
 
@@ -352,7 +354,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             float robustWeightSum = 0.0;
             if( useRobustLowHistorySpecular )
             {
-                robustLogLumaSum = log2( 1.0 + max( GetLuma( spec ), 0.0 ) ) * sums;
+                robustLogLumaSum = log2( max( GetLuma( spec ), 1e-5 ) ) * sums;
                 robustWeightSum = sums;
             }
 
@@ -417,7 +419,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
                     if( useRobustLowHistorySpecular )
                     {
-                        robustLogLumaSum += log2( 1.0 + max( GetLuma( s ), 0.0 ) ) * w;
+                        robustLogLumaSum += log2( max( GetLuma( s ), 1e-5 ) ) * w;
                         robustWeightSum += w;
                     }
 
@@ -441,9 +443,10 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
             if( useRobustLowHistorySpecular && robustWeightSum > NRD_EPS )
             {
-                float robustLuma = exp2( robustLogLumaSum / robustWeightSum ) - 1.0;
+                float robustLuma = exp2( robustLogLumaSum / robustWeightSum );
                 float linearLuma = GetLuma( spec );
-                float robustUpper = robustLuma * 1.05 + 0.01;
+                float robustUpper = robustLuma * ( transparentLowRoughness ? 1.20 : 1.08 );
+                robustUpper += transparentLowRoughness ? 0.0002 : 0.002;
                 float filteredLuma = lerp( linearLuma, min( linearLuma, robustUpper ),
                                            robustLowHistorySpecularStrength );
                 spec = ChangeLuma( spec, filteredLuma );
@@ -500,7 +503,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                     float s = gIn_SpecFast[ pos ].x;
 
                     if( useRobustLowHistorySpecular )
-                        s = log2( 1.0 + max( s, 0.0 ) );
+                        s = log2( max( s, 1e-5 ) );
 
                     m1 += s;
                     m2 += s * s;
@@ -511,14 +514,16 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             m1 *= invNorm;
             m2 *= invNorm;
 
-            float sigmaScale = useRobustLowHistorySpecular ? 0.625 : REBLUR_ANTI_FIREFLY_SIGMA_SCALE;
+            float sigmaScale = useRobustLowHistorySpecular ?
+                ( transparentLowRoughness ? 0.45 : 0.55 ) : REBLUR_ANTI_FIREFLY_SIGMA_SCALE;
             float sigma = GetStdDev( m1, m2 ) * sigmaScale;
             if( useRobustLowHistorySpecular )
             {
-                float ringUpper = exp2( m1 + sigma ) - 1.0;
+                float ringUpper = exp2( m1 + sigma );
                 float neighborMean = max( ( specM1 - specCenter ) /
                     ( ( BORDER * 2 + 1 ) * ( BORDER * 2 + 1 ) - 1 ), 0.0 );
-                float coherentUpper = neighborMean * 1.25 + 0.01;
+                float coherentUpper = neighborMean * ( transparentLowRoughness ? 1.30 : 1.15 );
+                coherentUpper += transparentLowRoughness ? 0.0002 : 0.002;
                 float filteredLuma = min( specLuma, max( ringUpper, coherentUpper ) );
                 specLuma = lerp( specLuma, filteredLuma, robustLowHistorySpecularStrength );
             }
