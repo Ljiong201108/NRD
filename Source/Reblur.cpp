@@ -393,6 +393,7 @@ void nrd::InstanceImpl::AddSharedConstants_Reblur(const ReblurSettings& settings
     consts->gIsRectChanged = isRectChanged ? 1 : 0;
     consts->gResetHistory = isHistoryReset ? 1 : 0;
     consts->gReturnHistoryLengthInsteadOfOcclusion = settings.returnHistoryLengthInsteadOfOcclusion ? 1 : 0;
+    consts->gEnableLowRoughnessSpecularStabilization = settings.enableLowRoughnessSpecularStabilization ? 1 : 0;
 }
 
 // Shaders

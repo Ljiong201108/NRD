@@ -323,6 +323,8 @@ namespace nrd
         // Diffuse history length shows disocclusions, specular history length is more complex and includes accelerations of various kinds caused by specular tracking.
         // History length is measured in frames, it can be in "[0; maxAccumulatedFrameNum]" range
         bool returnHistoryLengthInsteadOfOcclusion = false;
+
+        bool enableLowRoughnessSpecularStabilization = false;
     };
 
     //====================================================================================================================================================

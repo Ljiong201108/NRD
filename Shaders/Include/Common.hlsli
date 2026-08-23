@@ -91,6 +91,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #define NRD_EXP_WEIGHT_DEFAULT_SCALE                            3.0
 #define NRD_ROUGHNESS_SENSITIVITY                               0.01 // smaller => more sensitive
 #define NRD_CURVATURE_Z_THRESHOLD                               0.1 // normalized %
+#define NRD_CURVATURE_HIGH_PARALLAX_DISOCCLUSION_THRESHOLD       0.04
 #define NRD_MAX_ALLOWED_VIRTUAL_MOTION_ACCELERATION             15.0 // keep relatively high to avoid ruining concave mirrors
 #define NRD_MAX_PERCENT_OF_LOBE_VOLUME                          0.75 // normalized % // TODO: have a gut feeling that it's too much...
 #define NRD_STRAND_RELAXED_DISOCCLUSION_THRESHOLD               0.25

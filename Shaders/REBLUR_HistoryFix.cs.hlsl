@@ -312,6 +312,12 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
         float smc = GetSpecMagicCurve( roughness );
         float specNonLinearAccumSpeed = 1.0 / ( 1.0 + frameNum.y );
+        float robustLowHistorySpecularStrength = 0.0;
+        if( gEnableLowRoughnessSpecularStabilization != 0 && materialID < 0.5 && roughness <= 0.12 )
+        {
+            robustLowHistorySpecularStrength = saturate( 1.0 - frameNum.y / 18.0 );
+        }
+        bool useRobustLowHistorySpecular = robustLowHistorySpecularStrength > 0.0;
 
         float hitDistScale = _REBLUR_GetHitDistanceNormalization( viewZ, gHitDistParams, roughness );
         float hitDist = ExtractHitDist( spec ) * hitDistScale;
@@ -341,6 +347,14 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             #if( REBLUR_PERFORMANCE_MODE == 1 )
                 sums = 1.0 + 1.0 / ( 1.0 + gMaxAccumulatedFrameNum ) - specNonLinearAccumSpeed;
             #endif
+
+            float robustLogLumaSum = 0.0;
+            float robustWeightSum = 0.0;
+            if( useRobustLowHistorySpecular )
+            {
+                robustLogLumaSum = log2( 1.0 + max( GetLuma( spec ), 0.0 ) ) * sums;
+                robustWeightSum = sums;
+            }
 
             spec *= sums;
             #if( NRD_MODE == SH )
@@ -401,6 +415,12 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                     float d = hs - hitDist; // use normalized hit distances for simplicity ( no difference, roughness weight handles the rest )
                     w *= exp( -d * d * hitDistWeightNorm );
 
+                    if( useRobustLowHistorySpecular )
+                    {
+                        robustLogLumaSum += log2( 1.0 + max( GetLuma( s ), 0.0 ) ) * w;
+                        robustWeightSum += w;
+                    }
+
                     // Accumulate
                     sums += w;
 
@@ -418,6 +438,16 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             #if( NRD_MODE == SH )
                 specSh.xyz *= sums;
             #endif
+
+            if( useRobustLowHistorySpecular && robustWeightSum > NRD_EPS )
+            {
+                float robustLuma = exp2( robustLogLumaSum / robustWeightSum ) - 1.0;
+                float linearLuma = GetLuma( spec );
+                float robustUpper = robustLuma * 1.05 + 0.01;
+                float filteredLuma = lerp( linearLuma, min( linearLuma, robustUpper ),
+                                           robustLowHistorySpecularStrength );
+                spec = ChangeLuma( spec, filteredLuma );
+            }
         }
 
         // Local variance
@@ -469,6 +499,9 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                     int2 pos = clamp( pixelPos + int2( i, j ), 0, gRectSizeMinusOne );
                     float s = gIn_SpecFast[ pos ].x;
 
+                    if( useRobustLowHistorySpecular )
+                        s = log2( 1.0 + max( s, 0.0 ) );
+
                     m1 += s;
                     m2 += s * s;
                 }
@@ -478,8 +511,19 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             m1 *= invNorm;
             m2 *= invNorm;
 
-            float sigma = GetStdDev( m1, m2 ) * REBLUR_ANTI_FIREFLY_SIGMA_SCALE;
-            specLuma = clamp( specLuma, m1 - sigma, m1 + sigma );
+            float sigmaScale = useRobustLowHistorySpecular ? 0.625 : REBLUR_ANTI_FIREFLY_SIGMA_SCALE;
+            float sigma = GetStdDev( m1, m2 ) * sigmaScale;
+            if( useRobustLowHistorySpecular )
+            {
+                float ringUpper = exp2( m1 + sigma ) - 1.0;
+                float neighborMean = max( ( specM1 - specCenter ) /
+                    ( ( BORDER * 2 + 1 ) * ( BORDER * 2 + 1 ) - 1 ), 0.0 );
+                float coherentUpper = neighborMean * 1.25 + 0.01;
+                float filteredLuma = min( specLuma, max( ringUpper, coherentUpper ) );
+                specLuma = lerp( specLuma, filteredLuma, robustLowHistorySpecularStrength );
+            }
+            else
+                specLuma = clamp( specLuma, m1 - sigma, m1 + sigma );
         }
 
         // Fast history
