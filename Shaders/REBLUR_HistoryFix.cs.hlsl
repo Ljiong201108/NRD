@@ -241,8 +241,13 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
         float diffLuma = GetLuma( diff );
 
-        // Anti-firefly
-        if( gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 && ( materialID >= 0.5 || roughness <= 0.12 ) )
+        // Anti-firefly. The wide history ring is retained for transparent and
+        // low-roughness paths. Rough opaque diffuse uses the already resident
+        // 5x5 fast-history tile below: this catches isolated and two-pixel
+        // crawlers without comparing a newly illuminated region against a
+        // distant dark ring (which produced the moving-light black holes).
+        bool roughOpaqueDiffuse = materialID < 0.5 && roughness > 0.12;
+        if( gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 && !roughOpaqueDiffuse )
         {
             float m1 = 0;
             float m2 = 0;
@@ -271,6 +276,34 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
             float sigma = GetStdDev( m1, m2 ) * REBLUR_ANTI_FIREFLY_SIGMA_SCALE;
             diffLuma = clamp( diffLuma, m1 - sigma, m1 + sigma );
+        }
+        else if( gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 && diffLuma > 0.005 )
+        {
+            float logM1 = 0.0;
+            float logM2 = 0.0;
+
+            [unroll]
+            for( j = 0; j <= BORDER * 2; j++ )
+            {
+                [unroll]
+                for( i = 0; i <= BORDER * 2; i++ )
+                {
+                    if( i == BORDER && j == BORDER )
+                        continue;
+
+                    float d = max( Denanify( 1.0, s_DiffLuma[ threadPos.y + j ][ threadPos.x + i ] ), 0.0 );
+                    float logLuma = log2( max( d, 1e-5 ) );
+                    logM1 += logLuma;
+                    logM2 += logLuma * logLuma;
+                }
+            }
+
+            const float invNeighborCount = 1.0 / ( ( BORDER * 2 + 1 ) * ( BORDER * 2 + 1 ) - 1 );
+            logM1 *= invNeighborCount;
+            logM2 *= invNeighborCount;
+            float robustSigma = GetStdDev( logM1, logM2 );
+            float robustUpper = max( exp2( logM1 + robustSigma * 0.55 ) * 1.5, 0.001 );
+            diffLuma = min( diffLuma, robustUpper );
         }
 
         // Fast history
@@ -317,7 +350,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float robustLowHistorySpecularStrength = 0.0;
         bool transparentLowRoughness = materialID > 0.5 && materialID < 2.5 && roughness <= 0.45;
         bool opaqueLowRoughness = materialID < 0.5 && roughness <= 0.12;
-        if( gEnableLowRoughnessSpecularStabilization != 0 && transparentLowRoughness )
+        if( gEnableLowRoughnessSpecularStabilization != 0 && ( transparentLowRoughness || opaqueLowRoughness ) )
         {
             robustLowHistorySpecularStrength = saturate( 1.0 - frameNum.y / 24.0 );
         }
@@ -484,8 +517,12 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
         float specLuma = GetLuma( spec );
 
-        // Anti-firefly
-        if( gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 && !opaqueLowRoughness )
+        // Anti-firefly. Rough opaque reflections use the same local robust
+        // tile strategy as diffuse below; the wide linear ring is too easily
+        // biased by sparse continuation hits on dark cave materials.
+        bool roughOpaqueSpecular = materialID < 0.5 && roughness > 0.12;
+        if( gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 &&
+            !opaqueLowRoughness && !roughOpaqueSpecular )
         {
             float m1 = 0;
             float m2 = 0;
@@ -528,6 +565,35 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             }
             else
                 specLuma = clamp( specLuma, m1 - sigma, m1 + sigma );
+        }
+        else if( gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 &&
+                 roughOpaqueSpecular && specLuma > 0.005 )
+        {
+            float logM1 = 0.0;
+            float logM2 = 0.0;
+
+            [unroll]
+            for( j = 0; j <= BORDER * 2; j++ )
+            {
+                [unroll]
+                for( i = 0; i <= BORDER * 2; i++ )
+                {
+                    if( i == BORDER && j == BORDER )
+                        continue;
+
+                    float s = max( Denanify( 1.0, s_SpecLuma[ threadPos.y + j ][ threadPos.x + i ] ), 0.0 );
+                    float logLuma = log2( max( s, 1e-5 ) );
+                    logM1 += logLuma;
+                    logM2 += logLuma * logLuma;
+                }
+            }
+
+            const float invNeighborCount = 1.0 / ( ( BORDER * 2 + 1 ) * ( BORDER * 2 + 1 ) - 1 );
+            logM1 *= invNeighborCount;
+            logM2 *= invNeighborCount;
+            float robustSigma = GetStdDev( logM1, logM2 );
+            float robustUpper = max( exp2( logM1 + robustSigma * 0.55 ) * 1.5, 0.001 );
+            specLuma = min( specLuma, robustUpper );
         }
 
         // Fast history

@@ -153,7 +153,10 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float diffCoherentChange = Math::SmoothStep( 0.03, 0.14,
             diffCoherentDelta / max( max( diffLumaM1, smbDiffLumaHistory ) + diffLumaSigma, 0.002 ) );
         if( materialID < 0.5 && roughness > 0.12 )
-            diffAntilag *= lerp( 1.0, 0.4, diffCoherentChange );
+            // A guide-coherent lighting front is not stochastic noise. Drop
+            // the stale history almost completely so a moving held light does
+            // not leave a black region that fills in over several frames.
+            diffAntilag *= lerp( 1.0, 0.05, diffCoherentChange );
 
         // Clamp history and combine with the current frame
         float2 diffTemporalAccumulationParams = GetTemporalAccumulationParams( smbFootprintQuality, data1.x );
