@@ -82,6 +82,11 @@ NRD_OUTPUTS_END
 #define REBLUR_TemporalStabilizationGroupX 8
 #define REBLUR_TemporalStabilizationGroupY 16
 
+// MCVR uses the full 5x5 luminance neighborhood to distinguish a coherent
+// lighting change from a spatially localized stochastic path before admitting
+// a rise into stabilized history.
+#define NRD_USE_BORDER_2
+
 // Redirection
 #undef GROUP_X
 #undef GROUP_Y
