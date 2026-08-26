@@ -401,12 +401,17 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         #endif
 
         REBLUR_TYPE spec = gIn_Spec[ specPos ];
+        float specCurrentSpatialConfidence = 0.0;
 
         #if( NRD_MODE != OCCLUSION )
             if( gEnableLowRoughnessSpecularStabilization != 0 && opaqueLowRoughness )
             {
                 float3 spatialSpec = spec.xyz;
                 float spatialWeightSum = 1.0;
+                float centerLuma = max( GetLuma( spec ), 0.0 );
+                float spatialLumaM1 = centerLuma;
+                float spatialLumaM2 = centerLuma * centerLuma;
+                float spatialLumaSupport = 1.0;
 
                 [unroll]
                 for( j = -1; j <= 1; j++ )
@@ -420,12 +425,41 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                         int2 pos = clamp( int2( pixelPos ) + int2( i, j ), 0, gRectSizeMinusOne );
                         float w = GetLowRoughnessSpatialWeight( pos, materialID, N, roughness, viewZ );
                         REBLUR_TYPE s = gIn_Spec[ pos ];
+                        float sampleLuma = max( GetLuma( s ), 0.0 );
                         spatialSpec += s.xyz * w;
                         spatialWeightSum += w;
+                        spatialLumaM1 += sampleLuma * w;
+                        spatialLumaM2 += sampleLuma * sampleLuma * w;
+                        spatialLumaSupport += w * float(
+                            sampleLuma + 5e-5 >= centerLuma * 0.35 + 5e-5 );
                     }
                 }
 
                 spec.xyz = spatialSpec / spatialWeightSum;
+                spatialLumaM1 /= spatialWeightSum;
+                spatialLumaM2 /= spatialWeightSum;
+                float spatialLumaSigma = sqrt( max(
+                    spatialLumaM2 - spatialLumaM1 * spatialLumaM1, 0.0 ) );
+                float relativeSigma = spatialLumaSigma /
+                    max( spatialLumaM1, 5e-5 );
+                float centerAgreement =
+                    ( min( centerLuma, spatialLumaM1 ) + 5e-5 ) /
+                    ( max( centerLuma, spatialLumaM1 ) + 5e-5 );
+                float spatialReliability = Math::SmoothStep(
+                    4.0, 7.0, spatialWeightSum );
+                float spatialSupport = Math::SmoothStep(
+                    0.50, 0.80, spatialLumaSupport / spatialWeightSum );
+                float spatialUniformity = 1.0 - Math::SmoothStep(
+                    0.65, 1.50, relativeSigma );
+
+                // The current checker sample may alter history quickly only
+                // when the same change covers a guide-compatible 3x3 region.
+                // This keeps isolated Monte-Carlo hits on the slow path while
+                // allowing a real reflected emitter to turn on and off in a
+                // few frames.
+                specCurrentSpatialConfidence = spatialReliability *
+                    spatialSupport * spatialUniformity *
+                    Math::SmoothStep( 0.25, 0.65, centerAgreement );
             }
         #endif
 
@@ -875,9 +909,34 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float specAccumSpeedCorrected = lerp( smbSpecAccumSpeed_NoHistoryFix, vmbSpecAccumSpeed_NoHistoryFix, virtualHistoryAmount ); // avoid "HistoryFix" in responsive accumulation
         float specAccumSpeed = lerp( smbSpecAccumSpeed, vmbSpecAccumSpeed, virtualHistoryAmount );
         float specNonLinearAccumSpeed = 1.0 / ( 1.0 + specAccumSpeed );
+        float specCoherentChangeConfidence = 0.0;
 
         if( !specHasData )
             specNonLinearAccumSpeed *= lerp( 1.0 - gCheckerboardResolveAccumSpeed, 1.0, specNonLinearAccumSpeed );
+
+        #if( NRD_MODE != OCCLUSION )
+            if( gEnableLowRoughnessSpecularStabilization != 0 &&
+                opaqueLowRoughness && specHasData )
+            {
+                float currentLuma = max( GetLuma( spec ), 0.0 );
+                float historyLuma = max( GetLuma( specHistory ), 0.0 );
+                float relativeChange = abs( currentLuma - historyLuma ) /
+                    max( max( currentLuma, historyLuma ), 0.001 );
+                specCoherentChangeConfidence = specCurrentSpatialConfidence *
+                    Math::SmoothStep( 0.10, 0.30, relativeChange );
+
+                // Reflected emitters need a bounded but prompt rise. A
+                // coherent fall is safer and intentionally converges faster
+                // so that a moving highlight cannot leave a bright tail.
+                float baseResponse = currentLuma < historyLuma ? 0.42 : 0.18;
+                float temporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
+                float coherentResponse = 1.0 - pow(
+                    1.0 - baseResponse, temporalFrameScale );
+                specNonLinearAccumSpeed = max(
+                    specNonLinearAccumSpeed,
+                    coherentResponse * specCoherentChangeConfidence );
+            }
+        #endif
 
         REBLUR_TYPE specResult = MixHistoryAndCurrent( specHistory, spec, specNonLinearAccumSpeed, roughness ); // TODO: previously was "roughnessModified"
 
@@ -919,6 +978,12 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         {
             float specLumaResult = GetLuma( specResult );
             float specFireflyUpper = GetLuma( specHistory ) * specMaxRelativeIntensity;
+            float currentLuma = max( GetLuma( spec ), 0.0 );
+            float coherentRiseConfidence = specCoherentChangeConfidence *
+                float( currentLuma > GetLuma( specHistory ) );
+            specFireflyUpper = max(
+                specFireflyUpper,
+                lerp( specFireflyUpper, currentLuma, coherentRiseConfidence ) );
             float specLumaClamped = min( specLumaResult, specFireflyUpper );
             specLumaClamped = lerp( specLumaResult, specLumaClamped, specAntifireflyFactor );
 
@@ -950,7 +1015,16 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
             // Firefly suppressor ( fixes heavy crawling under camera rotation: test 95, 120 )
             #if( NRD_MODE != OCCLUSION && NRD_MODE != DO )
-                float specFastClamped = min( specFastResult, GetLuma( specHistory ) * specMaxRelativeIntensity * REBLUR_FIREFLY_SUPPRESSOR_FAST_RELATIVE_INTENSITY );
+                float specFastUpper = GetLuma( specHistory ) *
+                    specMaxRelativeIntensity *
+                    REBLUR_FIREFLY_SUPPRESSOR_FAST_RELATIVE_INTENSITY;
+                float currentLuma = max( GetLuma( spec ), 0.0 );
+                float coherentRiseConfidence = specCoherentChangeConfidence *
+                    float( currentLuma > GetLuma( specHistory ) );
+                specFastUpper = max(
+                    specFastUpper,
+                    lerp( specFastUpper, currentLuma, coherentRiseConfidence ) );
+                float specFastClamped = min( specFastResult, specFastUpper );
                 specFastResult = lerp( specFastResult, specFastClamped, specAntifireflyFactor );
             #endif
 
@@ -1044,12 +1118,13 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             diffNonLinearAccumSpeed *= lerp( 1.0 - gCheckerboardResolveAccumSpeed, 1.0, diffNonLinearAccumSpeed );
 
         #if( NRD_MODE != OCCLUSION && NRD_MODE != DO )
-            // YCoCg history can carry a saturated old surface into a neutral
-            // opaque wall even when luminance reprojection still looks valid.
-            // Remove saturation or an opposing hue quickly. New chroma keeps
-            // NRD's normal response so a moving warm light is not desaturated.
-            // The existing diffuse history is the state; no new texture or
-            // wider spatial footprint is required.
+            // YCoCg history can carry an old hue into a surface even when
+            // luminance reprojection still looks valid. Reject only a
+            // well-defined opposing hue. A lower-saturation sample with the
+            // same hue is not evidence that the lighting became neutral: in a
+            // sparse checker stream, treating it as such repeatedly bleaches
+            // stable warm illumination. Ordinary NRD accumulation already
+            // converges history towards genuinely neutral current samples.
             float2 diffAdmittedNormalizedChroma = 0.0;
             bool adjustDiffChroma = false;
             bool useDiffChromaAdmission =
@@ -1070,16 +1145,13 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 float historyChromaLengthSq = dot( historyChroma, historyChroma );
                 float currentChromaLengthSq = dot( currentChroma, currentChroma );
                 float chromaAlignment = dot( historyChroma, currentChroma );
-                bool opposingChroma =
-                    historyChromaLengthSq > 1e-4 && chromaAlignment <= 0.0;
-                bool reducingChroma =
-                    currentChromaLengthSq < historyChromaLengthSq &&
-                    chromaAlignment > 0.0;
-                adjustDiffChroma = opposingChroma || reducingChroma;
+                bool opposingChroma = historyChromaLengthSq > 1e-4 &&
+                    currentChromaLengthSq > 1e-4 && chromaAlignment <= 0.0;
+                adjustDiffChroma = opposingChroma;
                 if( adjustDiffChroma )
                 {
-                    float2 chromaTarget = opposingChroma ? 0.0 : currentChroma;
-                    float baseChromaResponse = opposingChroma ? 0.85 : 0.65;
+                    float2 chromaTarget = 0.0;
+                    float baseChromaResponse = 0.85;
                     float chromaResponse = 1.0 - pow(
                         1.0 - baseChromaResponse, diffTemporalFrameScale );
                     diffAdmittedNormalizedChroma = lerp(

@@ -486,6 +486,16 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float specSpatialCoherence = Math::SmoothStep( 0.24, 0.64,
             specGuideLumaSpatialSupport / specGuideWeight );
         float specSpatialReliability = Math::SmoothStep( 4.0, 10.0, specGuideWeight );
+        float specGuideRelativeSigma = specGuideLumaSigma /
+            max( specGuideLumaM1, 5e-5 );
+        float specGuideCenterAgreement =
+            ( min( specLuma, specGuideLumaM1 ) + 5e-5 ) /
+            ( max( specLuma, specGuideLumaM1 ) + 5e-5 );
+        float specBroadChangeConfidence = specSpatialCoherence *
+            specSpatialReliability *
+            ( 1.0 - Math::SmoothStep(
+                0.55, 1.20, specGuideRelativeSigma ) ) *
+            Math::SmoothStep( 0.30, 0.70, specGuideCenterAgreement );
 
         // Clean-up fireflies if HistoryFix pass was in action
         if( data1.y < gHistoryFixFrameNum )
@@ -695,8 +705,11 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 if( !transparentGlossy && specSpatialReliability > 0.0 &&
                     specSpatialCoherence < 0.60 )
                     spatialTarget = min( spatialTarget, spatialUpper );
+                float confirmedResponse = lerp(
+                    0.001, 0.05, specTemporalConfirmation );
                 float maximumResponse = transparentGlossy ? 0.05 :
-                    lerp( 0.001, 0.05, specTemporalConfirmation );
+                    lerp( confirmedResponse, 0.32,
+                        specBroadChangeConfidence );
                 float minimumResponse = transparentGlossy ? 0.003 : 0.001;
                 float baseResponse = lerp( minimumResponse, maximumResponse,
                     customSpatialCoherence * customSpatialReliability );
