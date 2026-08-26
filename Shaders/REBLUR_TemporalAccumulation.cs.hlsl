@@ -1043,7 +1043,57 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         if( !diffHasData )
             diffNonLinearAccumSpeed *= lerp( 1.0 - gCheckerboardResolveAccumSpeed, 1.0, diffNonLinearAccumSpeed );
 
+        #if( NRD_MODE != OCCLUSION && NRD_MODE != DO )
+            // YCoCg history can carry a saturated old surface into a neutral
+            // opaque wall even when luminance reprojection still looks valid.
+            // Remove saturation or an opposing hue quickly. New chroma keeps
+            // NRD's normal response so a moving warm light is not desaturated.
+            // The existing diffuse history is the state; no new texture or
+            // wider spatial footprint is required.
+            float2 diffAdmittedNormalizedChroma = 0.0;
+            bool adjustDiffChroma = false;
+            bool useDiffChromaAdmission =
+                gEnableLowRoughnessSpecularStabilization != 0 &&
+                materialID < 0.5 && diffHasData;
+            float diffTemporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
+            if( useDiffChromaAdmission )
+            {
+                float diffHistoryLumaForChroma = max( GetLuma( diffHistory ), 0.0 );
+                float diffCurrentLumaForChroma = max( GetLuma( diff ), 0.0 );
+                float2 historyChroma = diffHistoryLumaForChroma > 1e-5 ?
+                    diffHistory.yz / diffHistoryLumaForChroma : 0.0;
+                float2 currentChroma = diffCurrentLumaForChroma > 1e-5 ?
+                    diff.yz / diffCurrentLumaForChroma : 0.0;
+                historyChroma = clamp( historyChroma, -4.0, 4.0 );
+                currentChroma = clamp( currentChroma, -4.0, 4.0 );
+
+                float historyChromaLengthSq = dot( historyChroma, historyChroma );
+                float currentChromaLengthSq = dot( currentChroma, currentChroma );
+                float chromaAlignment = dot( historyChroma, currentChroma );
+                bool opposingChroma =
+                    historyChromaLengthSq > 1e-4 && chromaAlignment <= 0.0;
+                bool reducingChroma =
+                    currentChromaLengthSq < historyChromaLengthSq &&
+                    chromaAlignment > 0.0;
+                adjustDiffChroma = opposingChroma || reducingChroma;
+                if( adjustDiffChroma )
+                {
+                    float2 chromaTarget = opposingChroma ? 0.0 : currentChroma;
+                    float baseChromaResponse = opposingChroma ? 0.85 : 0.65;
+                    float chromaResponse = 1.0 - pow(
+                        1.0 - baseChromaResponse, diffTemporalFrameScale );
+                    diffAdmittedNormalizedChroma = lerp(
+                        historyChroma, chromaTarget, chromaResponse );
+                }
+            }
+        #endif
+
         REBLUR_TYPE diffResult = MixHistoryAndCurrent( diffHistory, diff, diffNonLinearAccumSpeed );
+        #if( NRD_MODE != OCCLUSION && NRD_MODE != DO )
+            if( useDiffChromaAdmission && adjustDiffChroma )
+                diffResult.yz = diffAdmittedNormalizedChroma *
+                    max( GetLuma( diffResult ), 0.0 );
+        #endif
         #if( NRD_MODE == SH )
             REBLUR_SH_TYPE diffSh = gIn_DiffSh[ diffPos ];
             REBLUR_SH_TYPE diffShResult = lerp( diffShHistory, diffSh, diffNonLinearAccumSpeed );
@@ -1058,9 +1108,8 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
             float diffLumaResult = GetLuma( diffResult );
             float diffHistoryLuma = GetLuma( diffHistory );
-            float temporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
             float diffFireflyUpper = max( diffHistoryLuma * diffMaxRelativeIntensity,
-                                          diffHistoryLuma + 0.016 * temporalFrameScale );
+                                          diffHistoryLuma + 0.016 * diffTemporalFrameScale );
             float diffLumaClamped = min( diffLumaResult, diffFireflyUpper );
             diffLumaClamped = lerp( diffLumaResult, diffLumaClamped, diffAntifireflyFactor );
 
@@ -1092,7 +1141,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             #if( NRD_MODE != OCCLUSION && NRD_MODE != DO )
                 // Firefly suppressor ( fixes heavy crawling under camera rotation, test 99 )
                 float diffFastUpper = max( diffHistoryLuma * diffMaxRelativeIntensity * REBLUR_FIREFLY_SUPPRESSOR_FAST_RELATIVE_INTENSITY,
-                                           diffHistoryLuma + 0.016 * temporalFrameScale );
+                                           diffHistoryLuma + 0.016 * diffTemporalFrameScale );
                 float diffFastClamped = min( diffFastResult, diffFastUpper );
                 diffFastResult = lerp( diffFastResult, diffFastClamped, diffAntifireflyFactor );
             #endif

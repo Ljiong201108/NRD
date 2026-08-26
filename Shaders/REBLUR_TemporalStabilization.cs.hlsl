@@ -20,10 +20,19 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 groupshared float s_DiffLuma[ BUFFER_Y ][ BUFFER_X ];
 groupshared float s_SpecLuma[ BUFFER_Y ][ BUFFER_X ];
+groupshared float4 s_Normal_Roughness[ BUFFER_Y ][ BUFFER_X ];
+groupshared float2 s_ViewZ_Material[ BUFFER_Y ][ BUFFER_X ];
 
 void Preload( uint2 sharedPos, int2 globalPos )
 {
     globalPos = clamp( globalPos, 0, gRectSizeMinusOne );
+
+    float materialID;
+    s_Normal_Roughness[ sharedPos.y ][ sharedPos.x ] =
+        NRD_FrontEnd_UnpackNormalAndRoughness(
+            gIn_Normal_Roughness[ WithRectOrigin( globalPos ) ], materialID );
+    s_ViewZ_Material[ sharedPos.y ][ sharedPos.x ] = float2(
+        UnpackViewZ( gIn_ViewZ[ WithRectOrigin( globalPos ) ] ), materialID );
 
     #if( NRD_DIFF )
         s_DiffLuma[ sharedPos.y ][ sharedPos.x ] = GetLuma( gIn_Diff[ globalPos ] );
@@ -79,9 +88,11 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         smbPixelUv = Geometry::GetScreenUv( gWorldToClipPrev, Xprev );
     }
 
+    int2 smemPos = threadPos + BORDER;
+
     // Normal and roughness
-    float materialID;
-    float4 normalAndRoughness = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ WithRectOrigin( pixelPos ) ], materialID );
+    float4 normalAndRoughness = s_Normal_Roughness[ smemPos.y ][ smemPos.x ];
+    float materialID = s_ViewZ_Material[ smemPos.y ][ smemPos.x ].y;
     float3 N = normalAndRoughness.xyz;
     float roughness = normalAndRoughness.w;
 
@@ -99,14 +110,15 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float smbFootprintQuality = Filtering::ApplyBilinearFilter( smbOcclusion.x, smbOcclusion.y, smbOcclusion.z, smbOcclusion.w, smbBilinearFilter );
     smbFootprintQuality = Math::Sqrt01( smbFootprintQuality );
 
-    int2 smemPos = threadPos + BORDER;
-
     // Diffuse
     #if( NRD_DIFF )
         float diffLuma = s_DiffLuma[ smemPos.y ][ smemPos.x ];
         float diffLumaM1 = diffLuma;
         float diffLumaM2 = diffLuma * diffLuma;
-        float diffLumaSpatialSupport = 1.0;
+        float diffGuideLumaM1 = diffLuma;
+        float diffGuideLumaM2 = diffLuma * diffLuma;
+        float diffGuideWeight = 1.0;
+        float diffGuideLumaSpatialSupport = 1.0;
 
         [unroll]
         for( j = 0; j <= BORDER * 2; j++ )
@@ -123,7 +135,25 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 float d = s_DiffLuma[ pos.y ][ pos.x ];
                 diffLumaM1 += d;
                 diffLumaM2 += d * d;
-                diffLumaSpatialSupport += float( d >= max( diffLuma * 0.35, 1e-6 ) );
+
+                float4 sampleNormalAndRoughness = s_Normal_Roughness[ pos.y ][ pos.x ];
+                float2 sampleViewZAndMaterial = s_ViewZ_Material[ pos.y ][ pos.x ];
+                float relativeDepth = abs( sampleViewZAndMaterial.x - viewZ ) /
+                    max( min( sampleViewZAndMaterial.x, viewZ ), 0.1 );
+                float guideWeight = float( CompareMaterials(
+                    materialID, sampleViewZAndMaterial.y, gDiffMinMaterial ) );
+                guideWeight *= Math::SmoothStep( 0.88, 0.97,
+                    dot( sampleNormalAndRoughness.xyz, N ) );
+                guideWeight *= 1.0 - Math::SmoothStep( 0.015, 0.06, relativeDepth );
+                if( materialID > 0.5 )
+                    guideWeight *= 1.0 - Math::SmoothStep( 0.08, 0.22,
+                        abs( sampleNormalAndRoughness.w - roughness ) );
+
+                diffGuideLumaM1 += d * guideWeight;
+                diffGuideLumaM2 += d * d * guideWeight;
+                diffGuideWeight += guideWeight;
+                diffGuideLumaSpatialSupport += guideWeight *
+                    float( d >= max( diffLuma * 0.35, 1e-6 ) );
             }
         }
 
@@ -132,8 +162,12 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         diffLumaM2 /= ( BORDER * 2 + 1 ) * ( BORDER * 2 + 1 );
 
         float diffLumaSigma = GetStdDev( diffLumaM1, diffLumaM2 );
+        diffGuideLumaM1 /= diffGuideWeight;
+        diffGuideLumaM2 /= diffGuideWeight;
+        float diffGuideLumaSigma = GetStdDev( diffGuideLumaM1, diffGuideLumaM2 );
         float diffSpatialCoherence = Math::SmoothStep( 0.28, 0.68,
-            diffLumaSpatialSupport / float( ( BORDER * 2 + 1 ) * ( BORDER * 2 + 1 ) ) );
+            diffGuideLumaSpatialSupport / diffGuideWeight );
+        float diffSpatialReliability = Math::SmoothStep( 4.0, 10.0, diffGuideWeight );
 
         // Clean-up fireflies if HistoryFix pass was in action
         if( data1.x < gHistoryFixFrameNum )
@@ -154,6 +188,19 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
         // Compute antilag
         float diffAntilag = ComputeAntilag( smbDiffLumaHistory, diffLumaM1, diffLumaSigma, smbFootprintQuality * data1.x );
+        float coherentLightingChange = 0.0;
+        if( materialID < 0.5 && diffSpatialReliability > 0.0 )
+        {
+            float coherentRise = max(
+                diffGuideLumaM1 - smbDiffLumaHistory - diffGuideLumaSigma * 0.5,
+                0.0 );
+            coherentRise /= max(
+                max( diffGuideLumaM1, smbDiffLumaHistory ) + diffGuideLumaSigma,
+                0.002 );
+            coherentLightingChange = Math::SmoothStep( 0.04, 0.18, coherentRise );
+            coherentLightingChange *= diffSpatialCoherence * diffSpatialReliability;
+            diffAntilag *= lerp( 1.0, 0.20, coherentLightingChange );
+        }
 
         // Clamp history and combine with the current frame
         float2 diffTemporalAccumulationParams = GetTemporalAccumulationParams( smbFootprintQuality, data1.x );
@@ -173,27 +220,172 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             historyValidity *= float( pixelUv.x >= gSplitScreen );
             historyValidity *= float( smbPixelUv.x >= gSplitScreenPrev );
             float temporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
-            float spatialUpper = diffLumaM1 + diffLumaSigma * 0.50 + 0.00015 * temporalFrameScale;
+            float spatialUpper = diffGuideLumaM1 + diffGuideLumaSigma * 0.65 +
+                0.00015 * temporalFrameScale;
 
             // A newly disoccluded sample has no temporal evidence. Bound only
             // spatially isolated energy; broad illumination remains unchanged.
-            if( historyValidity <= 0.25 && diffSpatialCoherence < 0.55 )
+            if( historyValidity <= 0.25 && diffSpatialReliability > 0.0 &&
+                diffSpatialCoherence < 0.55 )
                 diffLumaStabilized = min( diffLumaStabilized, spatialUpper );
 
+            // Diffuse irradiance should vary smoothly on one opaque rough
+            // surface. Feed a small same-surface 5x5 relaxation into mature
+            // history: dark islands receive strong support from brighter
+            // neighbours, while a bright island has low coherence and moves
+            // only a few percent. Reprojection makes this remove a fixed bias
+            // over time without turning the footprint into a wider filter.
+            if( materialID < 0.5 &&
+                diffSpatialReliability > 0.0 && data1.x >= 2.0 )
+            {
+                float historyMaturity = Math::SmoothStep( 2.0, 8.0, data1.x );
+                float baseSpatialResponse = lerp( 0.015, 0.12, diffSpatialCoherence );
+                float spatialResponse = 1.0 - pow(
+                    1.0 - baseSpatialResponse,
+                    temporalFrameScale * historyMaturity * diffSpatialReliability );
+                diffLumaStabilized = lerp(
+                    diffLumaStabilized, diffGuideLumaM1, spatialResponse );
+            }
+
+            // Neighbour history is useful for removing a fixed low-frequency
+            // wall bias, but current-frame guides cannot validate a moving
+            // previous-frame footprint. Use it only on a slow-moving,
+            // fully valid surface. Each radius-2 tap must also carry mature
+            // history; invalid taps are omitted instead of being replaced by
+            // the centre value. Motion and coherent lighting changes bypass
+            // this relaxation, preserving edge and held-light response.
+            float motionInPixels = length(
+                ( smbPixelUv - pixelUv ) * gRectSize );
+            float staticSurfaceConfidence = historyValidity *
+                Math::SmoothStep( 0.75, 0.98, smbFootprintQuality ) *
+                ( 1.0 - Math::SmoothStep( 0.25, 1.50, motionInPixels ) ) *
+                Math::SmoothStep( 4.0, 10.0, data1.x ) *
+                diffSpatialReliability * ( 1.0 - coherentLightingChange );
+            if( materialID < 0.5 && staticSurfaceConfidence > 0.0 )
+            {
+                float spatialLower = max(
+                    diffGuideLumaM1 - diffGuideLumaSigma * 0.65 -
+                        0.00015 * temporalFrameScale,
+                    0.0 );
+                float historySpatialSum = clamp(
+                    diffLumaRiseReference, spatialLower, spatialUpper );
+                float historySpatialWeight = 1.0;
+                const int2 historyOffsets[ 4 ] = {
+                    int2( -2, 0 ), int2( 2, 0 ),
+                    int2( 0, -2 ), int2( 0, 2 )
+                };
+
+                [unroll]
+                for( uint historyTap = 0; historyTap < 4; historyTap++ )
+                {
+                    int2 offset = historyOffsets[ historyTap ];
+                    int2 guidePos = smemPos + offset;
+                    int2 tapPixelPos = clamp(
+                        int2( pixelPos ) + offset, 0, gRectSizeMinusOne );
+                    float4 sampleNormalAndRoughness =
+                        s_Normal_Roughness[ guidePos.y ][ guidePos.x ];
+                    float2 sampleViewZAndMaterial =
+                        s_ViewZ_Material[ guidePos.y ][ guidePos.x ];
+                    float relativeDepth = abs( sampleViewZAndMaterial.x - viewZ ) /
+                        max( min( sampleViewZAndMaterial.x, viewZ ), 0.1 );
+                    float guideWeight = float( CompareMaterials(
+                        materialID, sampleViewZAndMaterial.y, gDiffMinMaterial ) );
+                    guideWeight *= Math::SmoothStep( 0.88, 0.97,
+                        dot( sampleNormalAndRoughness.xyz, N ) );
+                    guideWeight *= 1.0 - Math::SmoothStep(
+                        0.015, 0.06, relativeDepth );
+                    REBLUR_DATA1_TYPE tapData1 = UnpackData1(
+                        gIn_Data1[ tapPixelPos ] );
+                    guideWeight *= Math::SmoothStep( 4.0, 10.0, tapData1.x );
+                    if( guideWeight <= 0.0 )
+                        continue;
+
+                    float2 historyPixel = clamp(
+                        smbPixelUv * gRectSizePrev + float2( offset ),
+                        0.5, gRectSizePrev - 0.5 );
+                    float historyLuma = gHistory_DiffLumaStabilized.SampleLevel(
+                        gLinearClamp, historyPixel * gResourceSizeInvPrev, 0 );
+                    historyLuma = clamp(
+                        max( historyLuma, 0.0 ), spatialLower, spatialUpper );
+                    historySpatialSum += historyLuma * guideWeight;
+                    historySpatialWeight += guideWeight;
+                }
+
+                float validTapConfidence = Math::SmoothStep(
+                    1.5, 3.0, historySpatialWeight - 1.0 );
+                float historySpatialResponse = 1.0 - pow(
+                    1.0 - 0.45,
+                    temporalFrameScale * staticSurfaceConfidence *
+                        validTapConfidence );
+                diffLumaStabilized = lerp(
+                    diffLumaStabilized,
+                    historySpatialSum / historySpatialWeight,
+                    historySpatialResponse );
+            }
+
+            // The centre reprojection already passed NRD's motion, depth and
+            // material tests, so it remains the sole temporal evidence used
+            // to admit a luminance rise.
             if( historyValidity > 0.25 && diffLumaStabilized > diffLumaRiseReference )
             {
-                // A single path contributes only a small hidden update. A
-                // surface-wide change gets a high response and therefore keeps
-                // held-light motion responsive. Persistent localized lighting
-                // reaches full intensity over several frames instead of
-                // appearing as a crawling bright patch.
+                // Bound a localized rise to the same-surface 5x5 envelope, but
+                // apply the response to the current signal rather than to an
+                // already temporally averaged value. This keeps stochastic
+                // paths out while allowing a dark initial history to converge.
+                float spatialTarget = diffLuma;
+                if( diffSpatialReliability > 0.0 && diffSpatialCoherence < 0.60 )
+                    spatialTarget = min( spatialTarget, spatialUpper );
+
                 float roughDiffuseResponse = Math::SmoothStep( 0.20, 0.50, roughness );
-                float maximumResponse = lerp( 0.04, 0.12, roughDiffuseResponse );
-                maximumResponse = materialID > 0.5 ? min( maximumResponse, 0.04 ) : maximumResponse;
-                float baseResponse = lerp( 0.003, maximumResponse, diffSpatialCoherence );
+                float maximumResponse = lerp( 0.10, 0.25, roughDiffuseResponse );
+                maximumResponse = materialID > 0.5 ? min( maximumResponse, 0.06 ) : maximumResponse;
+                // A 5x5 reconstructed path is spatially coherent even when it
+                // came from one stochastic source sample. Require a little
+                // temporal evidence before granting the full held-light
+                // response. An unconfirmed one-frame island is admitted at
+                // only 0.3%; the centre history must persist before a real
+                // lighting change can ramp to 8%.
+                float temporalLightingConfirmation = Math::SmoothStep(
+                    0.006, 0.04,
+                    diffLumaRiseReference /
+                        max( diffGuideLumaM1 + diffGuideLumaSigma * 0.5,
+                            0.002 ) );
+                temporalLightingConfirmation *= historyValidity *
+                    Math::SmoothStep( 2.0, 6.0, data1.x );
+                float coherentMaximumResponse = lerp(
+                    0.003, 0.08, temporalLightingConfirmation );
+                maximumResponse = lerp(
+                    maximumResponse, coherentMaximumResponse,
+                    coherentLightingChange );
+                // Sparse checker reconstruction can make one path appear
+                // fully coherent throughout the whole 5x5 tile. Spatial
+                // coherence alone must therefore never admit an opaque
+                // indirect rise immediately. The cap opens only after the
+                // centre history confirms the same rise;
+                // disocclusion and all decreases are handled outside this
+                // mature-history branch.
+                if( materialID < 0.5 )
+                {
+                    float opaqueResponseCap = lerp(
+                        0.003, 0.08, temporalLightingConfirmation );
+                    maximumResponse = min(
+                        maximumResponse, opaqueResponseCap );
+                }
+                // A spatially isolated rise must not bypass confirmation via
+                // the generic response floor. Broad lighting still selects
+                // maximumResponse through its high 5x5 coherence.
+                float minimumResponse = 0.003;
+                float baseResponse = lerp( minimumResponse, maximumResponse,
+                    diffSpatialCoherence * diffSpatialReliability );
                 float frameResponse = 1.0 - pow( 1.0 - baseResponse, temporalFrameScale );
-                float temporalRise = ( diffLumaStabilized - diffLumaRiseReference ) * frameResponse;
-                float absoluteAllowance = lerp( 0.00005, 0.00010, roughDiffuseResponse );
+                float temporalRise = max( spatialTarget - diffLumaRiseReference, 0.0 ) *
+                    frameResponse;
+                // At the 5.0 EV display lift, NRD's old 5e-5 dark-signal
+                // allowance becomes a visible code-value jump. Keep a tiny
+                // convergence floor; material lighting still uses the
+                // proportional response above.
+                float absoluteAllowance = lerp(
+                    0.000008, 0.000015, roughDiffuseResponse );
                 float temporalUpper = diffLumaRiseReference +
                     max( temporalRise, absoluteAllowance * temporalFrameScale );
                 diffLumaStabilized = min( diffLumaStabilized, temporalUpper );
@@ -202,7 +394,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             // Do not retain a bright temporal island after current spatial
             // evidence has fallen. Luminance decreases are intentionally
             // immediate, which removes the moving tail that reads as crawling.
-            if( diffLumaRiseReference > spatialUpper )
+            if( diffSpatialReliability > 0.0 && diffLumaRiseReference > spatialUpper )
                 diffLumaStabilized = min( diffLumaStabilized, max( diffLuma, spatialUpper ) );
         }
 
@@ -236,6 +428,10 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float specLumaM1 = specLuma;
         float specLumaM2 = specLuma * specLuma;
         float specLumaSpatialSupport = 1.0;
+        float specGuideLumaM1 = specLuma;
+        float specGuideLumaM2 = specLuma * specLuma;
+        float specGuideWeight = 1.0;
+        float specGuideLumaSpatialSupport = 1.0;
 
         [unroll]
         for( j = 0; j <= BORDER * 2; j++ )
@@ -252,7 +448,26 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 float s = s_SpecLuma[ pos.y ][ pos.x ];
                 specLumaM1 += s;
                 specLumaM2 += s * s;
-                specLumaSpatialSupport += float( s >= max( specLuma * 0.35, 1e-6 ) );
+                specLumaSpatialSupport += float(
+                    s >= max( specLuma * 0.35, 1e-6 ) );
+
+                float4 sampleNormalAndRoughness = s_Normal_Roughness[ pos.y ][ pos.x ];
+                float2 sampleViewZAndMaterial = s_ViewZ_Material[ pos.y ][ pos.x ];
+                float relativeDepth = abs( sampleViewZAndMaterial.x - viewZ ) /
+                    max( min( sampleViewZAndMaterial.x, viewZ ), 0.1 );
+                float guideWeight = float( CompareMaterials(
+                    materialID, sampleViewZAndMaterial.y, gSpecMinMaterial ) );
+                guideWeight *= Math::SmoothStep( 0.88, 0.97,
+                    dot( sampleNormalAndRoughness.xyz, N ) );
+                guideWeight *= 1.0 - Math::SmoothStep( 0.015, 0.06, relativeDepth );
+                guideWeight *= 1.0 - Math::SmoothStep( 0.025, 0.10,
+                    abs( sampleNormalAndRoughness.w - roughness ) );
+
+                specGuideLumaM1 += s * guideWeight;
+                specGuideLumaM2 += s * s * guideWeight;
+                specGuideWeight += guideWeight;
+                specGuideLumaSpatialSupport += guideWeight *
+                    float( s >= max( specLuma * 0.35, 1e-6 ) );
             }
         }
 
@@ -261,8 +476,16 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         specLumaM2 /= ( BORDER * 2 + 1 ) * ( BORDER * 2 + 1 );
 
         float specLumaSigma = GetStdDev( specLumaM1, specLumaM2 );
+        specGuideLumaM1 /= specGuideWeight;
+        specGuideLumaM2 /= specGuideWeight;
+        float specGuideLumaSigma = GetStdDev(
+            specGuideLumaM1, specGuideLumaM2 );
+        float specUnguidedSpatialCoherence = Math::SmoothStep( 0.24, 0.64,
+            specLumaSpatialSupport /
+                float( ( BORDER * 2 + 1 ) * ( BORDER * 2 + 1 ) ) );
         float specSpatialCoherence = Math::SmoothStep( 0.24, 0.64,
-            specLumaSpatialSupport / float( ( BORDER * 2 + 1 ) * ( BORDER * 2 + 1 ) ) );
+            specGuideLumaSpatialSupport / specGuideWeight );
+        float specSpatialReliability = Math::SmoothStep( 4.0, 10.0, specGuideWeight );
 
         // Clean-up fireflies if HistoryFix pass was in action
         if( data1.y < gHistoryFixFrameNum )
@@ -389,31 +612,105 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float specLumaStabilized = lerp( specLuma, specLumaHistory, min( specHistoryWeight, gStabilizationStrength ) );
 
         bool transparentGlossy = materialID > 0.5 && materialID < 2.5 && roughness <= 0.45;
-        bool opaqueLowRoughness = materialID < 0.5 && roughness <= 0.12;
+        bool opaqueLowRoughness = materialID < 0.5 && roughness <= 0.25;
         if( gEnableLowRoughnessSpecularStabilization != 0 &&
             ( transparentGlossy || opaqueLowRoughness ) )
         {
             float historyValidity = footprintQuality * float( data1.y >= 1.0 );
             historyValidity *= float( pixelUv.x >= gSplitScreen );
+            historyValidity *= virtualHistoryAmount != 1.0 ?
+                float( smbPixelUv.x >= gSplitScreenPrev ) : 1.0;
+            historyValidity *= virtualHistoryAmount != 0.0 ?
+                float( vmbPixelUv.x >= gSplitScreenPrev ) : 1.0;
             float temporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
-            float spatialUpper = specLumaM1 + specLumaSigma * 0.50 +
-                ( transparentGlossy ? 0.00008 : 0.00025 ) * temporalFrameScale;
+            float customSpatialCoherence = transparentGlossy ?
+                specUnguidedSpatialCoherence : specSpatialCoherence;
+            float customSpatialReliability = transparentGlossy ?
+                1.0 : specSpatialReliability;
+            float spatialUpper = transparentGlossy ?
+                specLumaM1 + specLumaSigma * 0.50 +
+                    0.00008 * temporalFrameScale :
+                specGuideLumaM1 + specGuideLumaSigma * 0.50 +
+                    0.00025 * temporalFrameScale;
 
-            if( historyValidity <= 0.25 && specSpatialCoherence < 0.55 )
-                specLumaStabilized = min( specLumaStabilized, spatialUpper );
+            if( historyValidity <= 0.25 && customSpatialReliability > 0.0 )
+            {
+                float disocclusionUpper = transparentGlossy ? spatialUpper :
+                    specGuideLumaM1 + specGuideLumaSigma * 0.30 +
+                        0.00002 * temporalFrameScale;
+                if( !opaqueLowRoughness || customSpatialCoherence < 0.55 )
+                    specLumaStabilized = min(
+                        specLumaStabilized, disocclusionUpper );
+                else
+                    // A broad current lobe still needs one bounded start when
+                    // its reprojected wall history is invalid; otherwise a
+                    // checker sample flashes exactly along moving wall edges.
+                    specLumaStabilized = min(
+                        specLumaStabilized,
+                        lerp( disocclusionUpper, spatialUpper, 0.20 ) );
+            }
+
+            // As with diffuse, the current guide cannot validate neighbouring
+            // previous-frame history taps. Confirm a glossy rise only with the
+            // centre reprojection, which has already passed NRD's SMB/VMB
+            // footprint tests.
+            float specTemporalConfirmation = transparentGlossy ? 1.0 :
+                Math::SmoothStep(
+                    0.15, 0.55,
+                    specLumaRiseReference /
+                        max( specGuideLumaM1 + specGuideLumaSigma * 0.5,
+                            0.001 ) );
+            if( opaqueLowRoughness )
+                specTemporalConfirmation *= historyValidity *
+                    Math::SmoothStep( 2.0, 8.0, data1.y );
+
+            // Low-roughness reflections can otherwise preserve an initially
+            // dark Monte-Carlo island indefinitely. Reuse the guide-fitted
+            // 5x5 moments to fill only a dark centre when its own reprojected
+            // history already carries the same energy. A current one-frame
+            // pulse can therefore neither fill nor brighten its neighbours.
+            if( opaqueLowRoughness && historyValidity > 0.25 &&
+                specSpatialReliability > 0.0 &&
+                specGuideLumaM1 > specLumaStabilized )
+            {
+                float darkIsland = Math::SmoothStep(
+                    0.04, 0.20,
+                    ( specGuideLumaM1 - specLumaStabilized ) /
+                        max( specGuideLumaM1 + specGuideLumaSigma, 0.001 ) );
+                float historyMaturity = Math::SmoothStep( 2.0, 8.0, data1.y );
+                float baseSpatialResponse = 0.08 * specSpatialCoherence *
+                    specSpatialReliability * darkIsland *
+                    specTemporalConfirmation;
+                float spatialResponse = 1.0 - pow(
+                    1.0 - baseSpatialResponse,
+                    temporalFrameScale * historyMaturity );
+                specLumaStabilized = lerp(
+                    specLumaStabilized, specGuideLumaM1, spatialResponse );
+            }
 
             if( historyValidity > 0.25 && specLumaStabilized > specLumaRiseReference )
             {
-                float baseResponse = lerp( 0.003, 0.05, specSpatialCoherence );
+                float spatialTarget = transparentGlossy ?
+                    specLumaStabilized : specLuma;
+                if( !transparentGlossy && specSpatialReliability > 0.0 &&
+                    specSpatialCoherence < 0.60 )
+                    spatialTarget = min( spatialTarget, spatialUpper );
+                float maximumResponse = transparentGlossy ? 0.05 :
+                    lerp( 0.001, 0.05, specTemporalConfirmation );
+                float minimumResponse = transparentGlossy ? 0.003 : 0.001;
+                float baseResponse = lerp( minimumResponse, maximumResponse,
+                    customSpatialCoherence * customSpatialReliability );
                 float frameResponse = 1.0 - pow( 1.0 - baseResponse, temporalFrameScale );
-                float temporalRise = ( specLumaStabilized - specLumaRiseReference ) * frameResponse;
-                float absoluteAllowance = transparentGlossy ? 0.00003 : 0.00008;
+                float temporalRise = max(
+                    spatialTarget - specLumaRiseReference, 0.0 ) * frameResponse;
+                float absoluteAllowance = transparentGlossy ? 0.00003 : 0.000008;
                 float temporalUpper = specLumaRiseReference +
                     max( temporalRise, absoluteAllowance * temporalFrameScale );
                 specLumaStabilized = min( specLumaStabilized, temporalUpper );
             }
 
-            if( specLumaRiseReference > spatialUpper )
+            if( customSpatialReliability > 0.0 &&
+                specLumaRiseReference > spatialUpper )
                 specLumaStabilized = min( specLumaStabilized, max( specLuma, spatialUpper ) );
         }
 
