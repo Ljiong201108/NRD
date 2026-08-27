@@ -1091,6 +1091,14 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             }
         #endif
 
+        #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+            // Preserve a current-frame luminance witness before temporal
+            // accumulation. Temporal stabilization uses it to distinguish a
+            // genuinely repeated lighting change from an old bright island
+            // lingering in REBLUR's accumulated/post-blurred signal.
+            gOut_DiffCurrentLuma[ pixelPos ] = max( GetLuma( diff ), 0.0 );
+        #endif
+
         // Sample history
         REBLUR_TYPE diffHistory;
         REBLUR_FAST_TYPE diffFastHistory;

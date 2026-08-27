@@ -81,9 +81,12 @@ NRD_OUTPUTS_START
         #if( NRD_MODE != OCCLUSION )
             NRD_OUTPUT( RWTexture2D, uint, gOut_Data2, u, 6 )
         #endif
+        #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+            NRD_OUTPUT( RWTexture2D, float, gOut_DiffCurrentLuma, u, 7 )
+        #endif
         #if( NRD_MODE == SH )
-            NRD_OUTPUT( RWTexture2D, REBLUR_SH_TYPE, gOut_DiffSh, u, 7 )
-            NRD_OUTPUT( RWTexture2D, REBLUR_SH_TYPE, gOut_SpecSh, u, 8 )
+            NRD_OUTPUT( RWTexture2D, REBLUR_SH_TYPE, gOut_DiffSh, u, 8 )
+            NRD_OUTPUT( RWTexture2D, REBLUR_SH_TYPE, gOut_SpecSh, u, 9 )
         #endif
     #elif( NRD_DIFF )
         NRD_OUTPUT( RWTexture2D, REBLUR_TYPE, gOut_Diff, u, 1 )
@@ -91,8 +94,11 @@ NRD_OUTPUTS_START
         #if( NRD_MODE != OCCLUSION )
             NRD_OUTPUT( RWTexture2D, uint, gOut_Data2, u, 3 )
         #endif
+        #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+            NRD_OUTPUT( RWTexture2D, float, gOut_DiffCurrentLuma, u, 4 )
+        #endif
         #if( NRD_MODE == SH )
-            NRD_OUTPUT( RWTexture2D, REBLUR_SH_TYPE, gOut_DiffSh, u, 4 )
+            NRD_OUTPUT( RWTexture2D, REBLUR_SH_TYPE, gOut_DiffSh, u, 5 )
         #endif
     #else
         NRD_OUTPUT( RWTexture2D, REBLUR_TYPE, gOut_Spec, u, 1 )

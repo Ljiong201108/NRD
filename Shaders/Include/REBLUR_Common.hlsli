@@ -321,6 +321,15 @@ void BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights1(
     _BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights_Color( c0, tex0 );
 }
 
+void BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights2(
+    float2 samplePos, float2 invResourceSize,
+    float4 bilinearCustomWeights, bool useBicubic,
+    Texture2D<float2> tex0, out float2 c0 ) // CatRom
+{
+    _BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights_Init;
+    _BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights_Color( c0, tex0 );
+}
+
 void BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights(
     float2 samplePos, float2 invResourceSize,
     float4 bilinearCustomWeights, bool useBicubic,

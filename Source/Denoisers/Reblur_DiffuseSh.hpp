@@ -33,8 +33,8 @@ void nrd::InstanceImpl::Add_ReblurDiffuseSh(DenoiserData& denoiserData) {
     AddTextureToPermanentPool({REBLUR_FORMAT_PREV_INTERNAL_DATA, 1});
     AddTextureToPermanentPool({REBLUR_FORMAT, 1});
     AddTextureToPermanentPool({REBLUR_FORMAT_FAST_HISTORY, 1});
-    AddTextureToPermanentPool({Format::R16_SFLOAT, 1});
-    AddTextureToPermanentPool({Format::R16_SFLOAT, 1});
+    AddTextureToPermanentPool({Format::RG16_SFLOAT, 1});
+    AddTextureToPermanentPool({Format::RG16_SFLOAT, 1});
     AddTextureToPermanentPool({REBLUR_FORMAT, 1});
 
     enum class Transient {
@@ -42,6 +42,7 @@ void nrd::InstanceImpl::Add_ReblurDiffuseSh(DenoiserData& denoiserData) {
         DATA2,
         DIFF_TMP2,
         DIFF_FAST_HISTORY,
+        DIFF_CURRENT_LUMA,
         DIFF_SH_TMP2,
         TILES,
     };
@@ -50,6 +51,7 @@ void nrd::InstanceImpl::Add_ReblurDiffuseSh(DenoiserData& denoiserData) {
     AddTextureToTransientPool({Format::R8_UINT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT_FAST_HISTORY, 1});
+    AddTextureToTransientPool({Format::R16_SFLOAT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT_TILES, 16});
 
@@ -145,6 +147,7 @@ void nrd::InstanceImpl::Add_ReblurDiffuseSh(DenoiserData& denoiserData) {
             PushOutput(DIFF_TEMP2);
             PushOutput(AsUint(Transient::DIFF_FAST_HISTORY));
             PushOutput(AsUint(Transient::DATA2));
+            PushOutput(AsUint(Transient::DIFF_CURRENT_LUMA));
             PushOutput(DIFF_SH_TEMP2);
 
             // Shaders
@@ -237,6 +240,7 @@ void nrd::InstanceImpl::Add_ReblurDiffuseSh(DenoiserData& denoiserData) {
             PushInput(AsUint(Transient::DATA2));
             PushInput(AsUint(Permanent::DIFF_HISTORY));
             PushInput(AsUint(Permanent::DIFF_HISTORY_STABILIZED_PING), AsUint(Permanent::DIFF_HISTORY_STABILIZED_PONG));
+            PushInput(AsUint(Transient::DIFF_CURRENT_LUMA));
             PushInput(AsUint(Permanent::DIFF_SH_HISTORY));
 
             // Outputs

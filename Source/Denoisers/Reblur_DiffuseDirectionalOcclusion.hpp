@@ -33,8 +33,8 @@ void nrd::InstanceImpl::Add_ReblurDiffuseDirectionalOcclusion(DenoiserData& deno
     AddTextureToPermanentPool({REBLUR_FORMAT_PREV_INTERNAL_DATA, 1});
     AddTextureToPermanentPool({REBLUR_FORMAT_DIRECTIONAL_OCCLUSION, 1});
     AddTextureToPermanentPool({REBLUR_FORMAT_DIRECTIONAL_OCCLUSION_FAST_HISTORY, 1});
-    AddTextureToPermanentPool({Format::R16_SFLOAT, 1});
-    AddTextureToPermanentPool({Format::R16_SFLOAT, 1});
+    AddTextureToPermanentPool({Format::RG16_SFLOAT, 1});
+    AddTextureToPermanentPool({Format::RG16_SFLOAT, 1});
 
     enum class Transient {
         DATA1 = TRANSIENT_POOL_START,

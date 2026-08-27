@@ -31,14 +31,15 @@ void nrd::InstanceImpl::Add_ReblurDiffuse(DenoiserData& denoiserData) {
     AddTextureToPermanentPool({REBLUR_FORMAT_PREV_INTERNAL_DATA, 1});
     AddTextureToPermanentPool({REBLUR_FORMAT, 1});
     AddTextureToPermanentPool({REBLUR_FORMAT_FAST_HISTORY, 1});
-    AddTextureToPermanentPool({Format::R16_SFLOAT, 1});
-    AddTextureToPermanentPool({Format::R16_SFLOAT, 1});
+    AddTextureToPermanentPool({Format::RG16_SFLOAT, 1});
+    AddTextureToPermanentPool({Format::RG16_SFLOAT, 1});
 
     enum class Transient {
         DATA1 = TRANSIENT_POOL_START,
         DATA2,
         DIFF_TMP2,
         DIFF_FAST_HISTORY,
+        DIFF_CURRENT_LUMA,
         TILES,
     };
 
@@ -46,6 +47,7 @@ void nrd::InstanceImpl::Add_ReblurDiffuse(DenoiserData& denoiserData) {
     AddTextureToTransientPool({Format::R8_UINT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT_FAST_HISTORY, 1});
+    AddTextureToTransientPool({Format::R16_SFLOAT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT_TILES, 16});
 
     std::array<ShaderMake::ShaderConstant, 2> commonDefines = {{
@@ -136,6 +138,7 @@ void nrd::InstanceImpl::Add_ReblurDiffuse(DenoiserData& denoiserData) {
             PushOutput(DIFF_TEMP2);
             PushOutput(AsUint(Transient::DIFF_FAST_HISTORY));
             PushOutput(AsUint(Transient::DATA2));
+            PushOutput(AsUint(Transient::DIFF_CURRENT_LUMA));
 
             // Shaders
             AddDispatch(REBLUR_TemporalAccumulation, commonDefines);
@@ -219,6 +222,7 @@ void nrd::InstanceImpl::Add_ReblurDiffuse(DenoiserData& denoiserData) {
             PushInput(AsUint(Transient::DATA2));
             PushInput(AsUint(Permanent::DIFF_HISTORY));
             PushInput(AsUint(Permanent::DIFF_HISTORY_STABILIZED_PING), AsUint(Permanent::DIFF_HISTORY_STABILIZED_PONG));
+            PushInput(AsUint(Transient::DIFF_CURRENT_LUMA));
 
             // Outputs
             PushOutput(AsUint(ResourceType::IN_MV));

@@ -20,6 +20,9 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 groupshared float s_DiffLuma[ BUFFER_Y ][ BUFFER_X ];
 groupshared float s_SpecLuma[ BUFFER_Y ][ BUFFER_X ];
+#if( NRD_DIFF && ( NRD_MODE == RADIANCE || NRD_MODE == SH ) )
+    groupshared float s_DiffCurrentLuma[ BUFFER_Y ][ BUFFER_X ];
+#endif
 groupshared float4 s_Normal_Roughness[ BUFFER_Y ][ BUFFER_X ];
 groupshared float2 s_ViewZ_Material[ BUFFER_Y ][ BUFFER_X ];
 
@@ -36,6 +39,11 @@ void Preload( uint2 sharedPos, int2 globalPos )
 
     #if( NRD_DIFF )
         s_DiffLuma[ sharedPos.y ][ sharedPos.x ] = GetLuma( gIn_Diff[ globalPos ] );
+    #endif
+
+    #if( NRD_DIFF && ( NRD_MODE == RADIANCE || NRD_MODE == SH ) )
+        s_DiffCurrentLuma[ sharedPos.y ][ sharedPos.x ] =
+            max( gIn_DiffCurrentLuma[ globalPos ], 0.0 );
     #endif
 
     #if( NRD_SPEC )
@@ -119,6 +127,12 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float diffGuideLumaM2 = diffLuma * diffLuma;
         float diffGuideWeight = 1.0;
         float diffGuideLumaSpatialSupport = 1.0;
+        #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+            float diffCurrentLuma = s_DiffCurrentLuma[ smemPos.y ][ smemPos.x ];
+            float diffCurrentGuideLumaM1 = diffCurrentLuma;
+            float diffCurrentGuideLumaM2 = diffCurrentLuma * diffCurrentLuma;
+            float diffCurrentGuideLumaSpatialSupport = 1.0;
+        #endif
 
         [unroll]
         for( j = 0; j <= BORDER * 2; j++ )
@@ -154,6 +168,14 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 diffGuideWeight += guideWeight;
                 diffGuideLumaSpatialSupport += guideWeight *
                     float( d >= max( diffLuma * 0.35, 1e-6 ) );
+
+                #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+                    float currentD = s_DiffCurrentLuma[ pos.y ][ pos.x ];
+                    diffCurrentGuideLumaM1 += currentD * guideWeight;
+                    diffCurrentGuideLumaM2 += currentD * currentD * guideWeight;
+                    diffCurrentGuideLumaSpatialSupport += guideWeight *
+                        float( currentD >= max( diffCurrentLuma * 0.35, 1e-6 ) );
+                #endif
             }
         }
 
@@ -168,22 +190,33 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float diffSpatialCoherence = Math::SmoothStep( 0.28, 0.68,
             diffGuideLumaSpatialSupport / diffGuideWeight );
         float diffSpatialReliability = Math::SmoothStep( 4.0, 10.0, diffGuideWeight );
+        #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+            diffCurrentGuideLumaM1 /= diffGuideWeight;
+            diffCurrentGuideLumaM2 /= diffGuideWeight;
+            float diffCurrentGuideLumaSigma = GetStdDev(
+                diffCurrentGuideLumaM1, diffCurrentGuideLumaM2 );
+            float diffCurrentSpatialCoherence = Math::SmoothStep( 0.28, 0.68,
+                diffCurrentGuideLumaSpatialSupport / diffGuideWeight );
+        #endif
 
         // Clean-up fireflies if HistoryFix pass was in action
         if( data1.x < gHistoryFixFrameNum )
             diffLuma = min( diffLuma, diffLumaM1 * ( 1.2 + 1.0 / ( 1.0 + data1.x ) ) );
 
         // Sample history - surface motion
-        float smbDiffLumaHistory;
+        float2 smbDiffHistoryState;
 
-        BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights1(
+        BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights2(
             saturate( smbPixelUv ) * gRectSizePrev, gResourceSizeInvPrev,
             smbOcclusionWeights, smbAllowCatRom,
-            gHistory_DiffLumaStabilized, smbDiffLumaHistory
+            gHistory_DiffLumaStabilized, smbDiffHistoryState
         );
 
         // Avoid negative values
-        smbDiffLumaHistory = max( smbDiffLumaHistory, 0.0 );
+        float smbDiffLumaHistory = max( smbDiffHistoryState.x, 0.0 );
+        float diffRisePersistenceHistory = saturate( smbDiffHistoryState.y );
+        float diffRisePersistence = 0.0;
+        float currentLightingChange = 0.0;
         float diffLumaRiseReference = smbDiffLumaHistory;
 
         // Compute antilag
@@ -222,6 +255,55 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             float temporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
             float spatialUpper = diffGuideLumaM1 + diffGuideLumaSigma * 0.65 +
                 0.00015 * temporalFrameScale;
+
+            #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+                // A reconstructed checker sample can fill this entire 5x5
+                // footprint, so current-frame spatial coherence is not proof
+                // of a lighting change. Advance the second history channel
+                // only when the same reprojected opaque surface sees the rise
+                // again. A checker-missed frame may retain but never advance
+                // the vote; a rejected footprint or material change discards
+                // it instead of handing confidence to a neighbouring island.
+                float currentCoherentRise = max(
+                    diffCurrentGuideLumaM1 - diffLumaRiseReference -
+                        diffCurrentGuideLumaSigma * 0.5,
+                    0.0 );
+                currentCoherentRise /= max(
+                    max( diffCurrentGuideLumaM1, diffLumaRiseReference ) +
+                        diffCurrentGuideLumaSigma,
+                    0.002 );
+                float currentCenterAgreement =
+                    ( min( diffCurrentLuma, diffCurrentGuideLumaM1 ) + 1e-6 ) /
+                    ( max( diffCurrentLuma, diffCurrentGuideLumaM1 ) + 1e-6 );
+                currentLightingChange = Math::SmoothStep(
+                    0.04, 0.18, currentCoherentRise );
+                currentLightingChange *= diffCurrentSpatialCoherence *
+                    diffSpatialReliability * Math::SmoothStep(
+                        0.25, 0.65, currentCenterAgreement );
+                float persistentRiseEvidence = Math::SmoothStep(
+                    0.20, 0.55, currentLightingChange );
+                float persistenceSurfaceValidity = historyValidity *
+                    Math::SmoothStep( 0.70, 0.95, smbFootprintQuality ) *
+                    float( materialID < 0.5 );
+                if( coherentLightingChange > 0.15 &&
+                    persistenceSurfaceValidity > 0.75 )
+                {
+                    // Checker parity can omit direct evidence for one frame.
+                    // Keep (but never advance) the candidate while the
+                    // accumulated signal still describes the same rise. A
+                    // lingering PostBlur island therefore owns only its one
+                    // original vote; three independent current-frame hits are
+                    // still required to open the response.
+                    diffRisePersistence = diffRisePersistenceHistory;
+                    if( persistentRiseEvidence > 0.5 )
+                    {
+                        // R16F stores all four states (0, 0.34, 0.68, 1) with
+                        // ample separation around the threshold below.
+                        diffRisePersistence = min(
+                            diffRisePersistence + 0.34, 1.0 );
+                    }
+                }
+            #endif
 
             // A newly disoccluded sample has no temporal evidence. Bound only
             // spatially isolated energy; broad illumination remains unchanged.
@@ -304,7 +386,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                         smbPixelUv * gRectSizePrev + float2( offset ),
                         0.5, gRectSizePrev - 0.5 );
                     float historyLuma = gHistory_DiffLumaStabilized.SampleLevel(
-                        gLinearClamp, historyPixel * gResourceSizeInvPrev, 0 );
+                        gLinearClamp, historyPixel * gResourceSizeInvPrev, 0 ).x;
                     historyLuma = clamp(
                         max( historyLuma, 0.0 ), spatialLower, spatialUpper );
                     historySpatialSum += historyLuma * guideWeight;
@@ -339,12 +421,9 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 float roughDiffuseResponse = Math::SmoothStep( 0.20, 0.50, roughness );
                 float maximumResponse = lerp( 0.10, 0.25, roughDiffuseResponse );
                 maximumResponse = materialID > 0.5 ? min( maximumResponse, 0.06 ) : maximumResponse;
-                // A 5x5 reconstructed path is spatially coherent even when it
-                // came from one stochastic source sample. Require a little
-                // temporal evidence before granting the full held-light
-                // response. An unconfirmed one-frame island is admitted at
-                // only 0.3%; the centre history must persist before a real
-                // lighting change can ramp to 8%.
+                // This older luminance ratio remains useful for transparent
+                // materials, but it cannot distinguish a new stochastic path
+                // from a real opaque-lighting rise.
                 float temporalLightingConfirmation = Math::SmoothStep(
                     0.006, 0.04,
                     diffLumaRiseReference /
@@ -357,24 +436,63 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 maximumResponse = lerp(
                     maximumResponse, coherentMaximumResponse,
                     coherentLightingChange );
-                // Sparse checker reconstruction can make one path appear
-                // fully coherent throughout the whole 5x5 tile. Spatial
-                // coherence alone must therefore never admit an opaque
-                // indirect rise immediately. The cap opens only after the
-                // centre history confirms the same rise;
-                // disocclusion and all decreases are handled outside this
-                // mature-history branch.
+                // For opaque diffuse, the first two observations are buffered
+                // without changing luminance. The response opens on the third
+                // observation at the reprojected surface point.
+                // A one-frame or walking checker island therefore never
+                // becomes visible merely because it filled the spatial guide.
+                #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+                    float persistentLightingConfirmation = Math::SmoothStep(
+                        0.80, 0.99, diffRisePersistence );
+                    // Keep ordinary low-amplitude Monte-Carlo convergence
+                    // symmetric. Only a rise strong enough to become a
+                    // visible island is frozen while it is unconfirmed;
+                    // otherwise suppressing every positive fluctuation while
+                    // accepting decreases would bias a stable surface dark.
+                    float suspiciousLightingRise = Math::SmoothStep(
+                        0.35, 0.70,
+                        max( coherentLightingChange,
+                            currentLightingChange ) );
+                    float unconfirmedLightingRise = suspiciousLightingRise *
+                        ( 1.0 - persistentLightingConfirmation );
+                    // Ordinary low-amplitude convergence must not wait for a
+                    // persistence vote. Apply the cross-frame gate only in
+                    // proportion to how strongly the rise resembles a
+                    // visible reconstructed island.
+                    float persistentResponseGate =
+                        1.0 - unconfirmedLightingRise;
+                    // Preserve long-term diffuse energy through NRD's
+                    // existing 0.3% convergence floor. This is far too slow
+                    // to reveal a walking island; only the old coherent 8%
+                    // path needs to remain closed until confirmation.
+                    float opaqueResponseFloor = 0.003;
+                #else
+                    float persistentLightingConfirmation = 1.0;
+                    float unconfirmedLightingRise = 0.0;
+                    float opaqueResponseFloor = 0.003;
+                #endif
                 if( materialID < 0.5 )
                 {
-                    float opaqueResponseCap = lerp(
-                        0.003, 0.08, temporalLightingConfirmation );
+                    #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+                        float opaqueResponseCap = lerp(
+                            opaqueResponseFloor, 0.08,
+                            coherentLightingChange *
+                                persistentResponseGate );
+                    #else
+                        float opaqueResponseCap = lerp(
+                            0.003, 0.08, coherentLightingChange );
+                    #endif
                     maximumResponse = min(
                         maximumResponse, opaqueResponseCap );
                 }
-                // A spatially isolated rise must not bypass confirmation via
-                // the generic response floor. Broad lighting still selects
-                // maximumResponse through its high 5x5 coherence.
+                // Bound an unconfirmed opaque path to its sub-visible
+                // convergence floor. Other material classes keep the
+                // convergence floor used by the existing tuning.
                 float minimumResponse = 0.003;
+                #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+                    minimumResponse = materialID < 0.5 ?
+                        opaqueResponseFloor : minimumResponse;
+                #endif
                 float baseResponse = lerp( minimumResponse, maximumResponse,
                     diffSpatialCoherence * diffSpatialReliability );
                 float frameResponse = 1.0 - pow( 1.0 - baseResponse, temporalFrameScale );
@@ -386,6 +504,10 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 // proportional response above.
                 float absoluteAllowance = lerp(
                     0.000008, 0.000015, roughDiffuseResponse );
+                #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+                    if( materialID < 0.5 )
+                        absoluteAllowance *= 1.0 - unconfirmedLightingRise;
+                #endif
                 float temporalUpper = diffLumaRiseReference +
                     max( temporalRise, absoluteAllowance * temporalFrameScale );
                 diffLumaStabilized = min( diffLumaStabilized, temporalUpper );
@@ -409,7 +531,8 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         diff.w = gReturnHistoryLengthInsteadOfOcclusion ? data1.x : diff.w;
 
         gOut_Diff[ pixelPos ] = diff;
-        gOut_DiffLumaStabilized[ pixelPos ] = diffLumaStabilized;
+        gOut_DiffLumaStabilized[ pixelPos ] = float2(
+            diffLumaStabilized, diffRisePersistence );
         #if( NRD_MODE == SH )
             gOut_DiffSh[ pixelPos ] = diffSh;
         #endif

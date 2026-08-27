@@ -39,8 +39,8 @@ void nrd::InstanceImpl::Add_ReblurDiffuseSpecular(DenoiserData& denoiserData) {
     AddTextureToPermanentPool({REBLUR_FORMAT_PREV_INTERNAL_DATA, 1});
     AddTextureToPermanentPool({REBLUR_FORMAT, 1});
     AddTextureToPermanentPool({REBLUR_FORMAT_FAST_HISTORY, 1});
-    AddTextureToPermanentPool({Format::R16_SFLOAT, 1});
-    AddTextureToPermanentPool({Format::R16_SFLOAT, 1});
+    AddTextureToPermanentPool({Format::RG16_SFLOAT, 1});
+    AddTextureToPermanentPool({Format::RG16_SFLOAT, 1});
     AddTextureToPermanentPool({REBLUR_FORMAT, 1});
     AddTextureToPermanentPool({REBLUR_FORMAT_FAST_HISTORY, 1});
     AddTextureToPermanentPool({Format::R16_SFLOAT, 1});
@@ -54,6 +54,7 @@ void nrd::InstanceImpl::Add_ReblurDiffuseSpecular(DenoiserData& denoiserData) {
         SPEC_HITDIST_FOR_TRACKING,
         DIFF_TMP2,
         DIFF_FAST_HISTORY,
+        DIFF_CURRENT_LUMA,
         SPEC_TMP2,
         SPEC_FAST_HISTORY,
         TILES,
@@ -64,6 +65,7 @@ void nrd::InstanceImpl::Add_ReblurDiffuseSpecular(DenoiserData& denoiserData) {
     AddTextureToTransientPool({REBLUR_FORMAT_HITDIST_FOR_TRACKING, 1});
     AddTextureToTransientPool({REBLUR_FORMAT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT_FAST_HISTORY, 1});
+    AddTextureToTransientPool({Format::R16_SFLOAT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT, 1});
     AddTextureToTransientPool({REBLUR_FORMAT_FAST_HISTORY, 1});
     AddTextureToTransientPool({REBLUR_FORMAT_TILES, 16});
@@ -170,6 +172,7 @@ void nrd::InstanceImpl::Add_ReblurDiffuseSpecular(DenoiserData& denoiserData) {
             PushOutput(AsUint(Transient::SPEC_FAST_HISTORY));
             PushOutput(AsUint(Permanent::SPEC_HITDIST_FOR_TRACKING_PONG), AsUint(Permanent::SPEC_HITDIST_FOR_TRACKING_PING));
             PushOutput(AsUint(Transient::DATA2));
+            PushOutput(AsUint(Transient::DIFF_CURRENT_LUMA));
 
             // Shaders
             AddDispatch(REBLUR_TemporalAccumulation, commonDefines);
@@ -269,6 +272,7 @@ void nrd::InstanceImpl::Add_ReblurDiffuseSpecular(DenoiserData& denoiserData) {
             PushInput(AsUint(Permanent::SPEC_HISTORY));
             PushInput(AsUint(Permanent::DIFF_HISTORY_STABILIZED_PING), AsUint(Permanent::DIFF_HISTORY_STABILIZED_PONG));
             PushInput(AsUint(Permanent::SPEC_HISTORY_STABILIZED_PING), AsUint(Permanent::SPEC_HISTORY_STABILIZED_PONG));
+            PushInput(AsUint(Transient::DIFF_CURRENT_LUMA));
 
             // Outputs
             PushOutput(AsUint(ResourceType::IN_MV));

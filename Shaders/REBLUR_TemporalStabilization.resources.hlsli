@@ -28,17 +28,21 @@ NRD_INPUTS_START
         NRD_INPUT( Texture2D, float, gIn_SpecHitDistForTracking, t, 6 )
         NRD_INPUT( Texture2D, REBLUR_TYPE, gIn_Diff, t, 7 )
         NRD_INPUT( Texture2D, REBLUR_TYPE, gIn_Spec, t, 8 )
-        NRD_INPUT( Texture2D, float, gHistory_DiffLumaStabilized, t, 9 )
+        NRD_INPUT( Texture2D, float2, gHistory_DiffLumaStabilized, t, 9 )
         NRD_INPUT( Texture2D, float, gHistory_SpecLumaStabilized, t, 10 )
+        NRD_INPUT( Texture2D, float, gIn_DiffCurrentLuma, t, 11 )
         #if( NRD_MODE == SH )
-            NRD_INPUT( Texture2D, REBLUR_SH_TYPE, gIn_DiffSh, t, 11 )
-            NRD_INPUT( Texture2D, REBLUR_SH_TYPE, gIn_SpecSh, t, 12 )
+            NRD_INPUT( Texture2D, REBLUR_SH_TYPE, gIn_DiffSh, t, 12 )
+            NRD_INPUT( Texture2D, REBLUR_SH_TYPE, gIn_SpecSh, t, 13 )
         #endif
     #elif( NRD_DIFF )
         NRD_INPUT( Texture2D, REBLUR_TYPE, gIn_Diff, t, 5 )
-        NRD_INPUT( Texture2D, float, gHistory_DiffLumaStabilized, t, 6 )
+        NRD_INPUT( Texture2D, float2, gHistory_DiffLumaStabilized, t, 6 )
+        #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+            NRD_INPUT( Texture2D, float, gIn_DiffCurrentLuma, t, 7 )
+        #endif
         #if( NRD_MODE == SH )
-            NRD_INPUT( Texture2D, REBLUR_SH_TYPE, gIn_DiffSh, t, 7 )
+            NRD_INPUT( Texture2D, REBLUR_SH_TYPE, gIn_DiffSh, t, 8 )
         #endif
     #else
         NRD_INPUT( Texture2D, float4, gIn_BaseColor_Metalness, t, 5 )
@@ -57,7 +61,7 @@ NRD_OUTPUTS_START
     #if( NRD_DIFF && NRD_SPEC )
         NRD_OUTPUT( RWTexture2D, REBLUR_TYPE, gOut_Diff, u, 2 )
         NRD_OUTPUT( RWTexture2D, REBLUR_TYPE, gOut_Spec, u, 3 )
-        NRD_OUTPUT( RWTexture2D, float, gOut_DiffLumaStabilized, u, 4 )
+        NRD_OUTPUT( RWTexture2D, float2, gOut_DiffLumaStabilized, u, 4 )
         NRD_OUTPUT( RWTexture2D, float, gOut_SpecLumaStabilized, u, 5 )
         #if( NRD_MODE == SH )
             NRD_OUTPUT( RWTexture2D, REBLUR_SH_TYPE, gOut_DiffSh, u, 6 )
@@ -65,7 +69,7 @@ NRD_OUTPUTS_START
         #endif
     #elif( NRD_DIFF )
         NRD_OUTPUT( RWTexture2D, REBLUR_TYPE, gOut_Diff, u, 2 )
-        NRD_OUTPUT( RWTexture2D, float, gOut_DiffLumaStabilized, u, 3 )
+        NRD_OUTPUT( RWTexture2D, float2, gOut_DiffLumaStabilized, u, 3 )
         #if( NRD_MODE == SH )
             NRD_OUTPUT( RWTexture2D, REBLUR_SH_TYPE, gOut_DiffSh, u, 4 )
         #endif
