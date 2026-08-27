@@ -217,6 +217,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float diffRisePersistenceHistory = saturate( smbDiffHistoryState.y );
         float diffRisePersistence = 0.0;
         float currentLightingChange = 0.0;
+        float diffBroadCurrentConfidence = 0.0;
         float diffLumaRiseReference = smbDiffLumaHistory;
 
         // Compute antilag
@@ -273,6 +274,23 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 currentLightingChange *= diffCurrentSpatialCoherence *
                     diffSpatialReliability * Math::SmoothStep(
                         0.25, 0.65, currentCenterAgreement );
+                float diffCurrentRelativeSigma = diffCurrentGuideLumaSigma /
+                    max( diffCurrentGuideLumaM1, 0.002 );
+                float diffPostRelativeSigma = diffGuideLumaSigma /
+                    max( diffGuideLumaM1, 0.002 );
+                float diffCurrentPostAgreement =
+                    ( min( diffCurrentGuideLumaM1, diffGuideLumaM1 ) + 1e-6 ) /
+                    ( max( diffCurrentGuideLumaM1, diffGuideLumaM1 ) + 1e-6 );
+                diffBroadCurrentConfidence = diffCurrentSpatialCoherence *
+                    diffSpatialCoherence * diffSpatialReliability *
+                    Math::SmoothStep( 0.25, 0.65, currentCenterAgreement ) *
+                    ( 1.0 - Math::SmoothStep(
+                        0.18, 0.55, diffCurrentRelativeSigma ) ) *
+                    ( 1.0 - Math::SmoothStep(
+                        0.18, 0.55, diffPostRelativeSigma ) ) *
+                    Math::SmoothStep(
+                        0.20, 0.55, diffCurrentPostAgreement );
+                diffBroadCurrentConfidence *= float( materialID < 0.5 );
                 float persistentRiseEvidence = Math::SmoothStep(
                     0.20, 0.55, currentLightingChange );
                 float persistenceSurfaceValidity = historyValidity *
@@ -445,6 +463,15 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 #endif
                 float temporalUpper = diffLumaRiseReference +
                     max( temporalRise, absoluteAllowance * temporalFrameScale );
+                #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
+                    float broadLightingFrameResponse = 1.0 - pow(
+                        1.0 - 0.10 * diffBroadCurrentConfidence,
+                        temporalFrameScale );
+                    float broadLightingUpper = diffLumaRiseReference +
+                        max( diffLumaStabilized - diffLumaRiseReference, 0.0 ) *
+                            broadLightingFrameResponse;
+                    temporalUpper = max( temporalUpper, broadLightingUpper );
+                #endif
                 diffLumaStabilized = min( diffLumaStabilized, temporalUpper );
             }
 
