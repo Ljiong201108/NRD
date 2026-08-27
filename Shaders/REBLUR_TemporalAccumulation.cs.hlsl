@@ -452,11 +452,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 float spatialUniformity = 1.0 - Math::SmoothStep(
                     0.65, 1.50, relativeSigma );
 
-                // The current checker sample may alter history quickly only
-                // when the same change covers a guide-compatible 3x3 region.
-                // This keeps isolated Monte-Carlo hits on the slow path while
-                // allowing a real reflected emitter to turn on and off in a
-                // few frames.
                 specCurrentSpatialConfidence = spatialReliability *
                     spatialSupport * spatialUniformity *
                     Math::SmoothStep( 0.25, 0.65, centerAgreement );
@@ -925,9 +920,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 specCoherentChangeConfidence = specCurrentSpatialConfidence *
                     Math::SmoothStep( 0.10, 0.30, relativeChange );
 
-                // Reflected emitters need a bounded but prompt rise. A
-                // coherent fall is safer and intentionally converges faster
-                // so that a moving highlight cannot leave a bright tail.
                 float baseResponse = currentLuma < historyLuma ? 0.42 : 0.18;
                 float temporalFrameScale = 2.0 / max( gFramerateScale, 1.0 );
                 float coherentResponse = 1.0 - pow(
@@ -1092,10 +1084,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         #endif
 
         #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
-            // Preserve a current-frame luminance witness before temporal
-            // accumulation. Temporal stabilization uses it to distinguish a
-            // genuinely repeated lighting change from an old bright island
-            // lingering in REBLUR's accumulated/post-blurred signal.
             gOut_DiffCurrentLuma[ pixelPos ] = max( GetLuma( diff ), 0.0 );
         #endif
 
@@ -1126,13 +1114,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             diffNonLinearAccumSpeed *= lerp( 1.0 - gCheckerboardResolveAccumSpeed, 1.0, diffNonLinearAccumSpeed );
 
         #if( NRD_MODE != OCCLUSION && NRD_MODE != DO )
-            // YCoCg history can carry an old hue into a surface even when
-            // luminance reprojection still looks valid. Reject only a
-            // well-defined opposing hue. A lower-saturation sample with the
-            // same hue is not evidence that the lighting became neutral: in a
-            // sparse checker stream, treating it as such repeatedly bleaches
-            // stable warm illumination. Ordinary NRD accumulation already
-            // converges history towards genuinely neutral current samples.
             float2 diffAdmittedNormalizedChroma = 0.0;
             bool adjustDiffChroma = false;
             bool useDiffChromaAdmission =

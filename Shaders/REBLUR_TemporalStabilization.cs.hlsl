@@ -257,13 +257,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 0.00015 * temporalFrameScale;
 
             #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
-                // A reconstructed checker sample can fill this entire 5x5
-                // footprint, so current-frame spatial coherence is not proof
-                // of a lighting change. Advance the second history channel
-                // only when the same reprojected opaque surface sees the rise
-                // again. A checker-missed frame may retain but never advance
-                // the vote; a rejected footprint or material change discards
-                // it instead of handing confidence to a neighbouring island.
                 float currentCoherentRise = max(
                     diffCurrentGuideLumaM1 - diffLumaRiseReference -
                         diffCurrentGuideLumaSigma * 0.5,
@@ -288,35 +281,19 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 if( coherentLightingChange > 0.15 &&
                     persistenceSurfaceValidity > 0.75 )
                 {
-                    // Checker parity can omit direct evidence for one frame.
-                    // Keep (but never advance) the candidate while the
-                    // accumulated signal still describes the same rise. A
-                    // lingering PostBlur island therefore owns only its one
-                    // original vote; three independent current-frame hits are
-                    // still required to open the response.
                     diffRisePersistence = diffRisePersistenceHistory;
                     if( persistentRiseEvidence > 0.5 )
                     {
-                        // R16F stores all four states (0, 0.34, 0.68, 1) with
-                        // ample separation around the threshold below.
                         diffRisePersistence = min(
                             diffRisePersistence + 0.34, 1.0 );
                     }
                 }
             #endif
 
-            // A newly disoccluded sample has no temporal evidence. Bound only
-            // spatially isolated energy; broad illumination remains unchanged.
             if( historyValidity <= 0.25 && diffSpatialReliability > 0.0 &&
                 diffSpatialCoherence < 0.55 )
                 diffLumaStabilized = min( diffLumaStabilized, spatialUpper );
 
-            // Diffuse irradiance should vary smoothly on one opaque rough
-            // surface. Feed a small same-surface 5x5 relaxation into mature
-            // history: dark islands receive strong support from brighter
-            // neighbours, while a bright island has low coherence and moves
-            // only a few percent. Reprojection makes this remove a fixed bias
-            // over time without turning the footprint into a wider filter.
             if( materialID < 0.5 &&
                 diffSpatialReliability > 0.0 && data1.x >= 2.0 )
             {
@@ -329,13 +306,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                     diffLumaStabilized, diffGuideLumaM1, spatialResponse );
             }
 
-            // Neighbour history is useful for removing a fixed low-frequency
-            // wall bias, but current-frame guides cannot validate a moving
-            // previous-frame footprint. Use it only on a slow-moving,
-            // fully valid surface. Each radius-2 tap must also carry mature
-            // history; invalid taps are omitted instead of being replaced by
-            // the centre value. Motion and coherent lighting changes bypass
-            // this relaxation, preserving edge and held-light response.
             float motionInPixels = length(
                 ( smbPixelUv - pixelUv ) * gRectSize );
             float staticSurfaceConfidence = historyValidity *
@@ -405,15 +375,8 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                     historySpatialResponse );
             }
 
-            // The centre reprojection already passed NRD's motion, depth and
-            // material tests, so it remains the sole temporal evidence used
-            // to admit a luminance rise.
             if( historyValidity > 0.25 && diffLumaStabilized > diffLumaRiseReference )
             {
-                // Bound a localized rise to the same-surface 5x5 envelope, but
-                // apply the response to the current signal rather than to an
-                // already temporally averaged value. This keeps stochastic
-                // paths out while allowing a dark initial history to converge.
                 float spatialTarget = diffLuma;
                 if( diffSpatialReliability > 0.0 && diffSpatialCoherence < 0.60 )
                     spatialTarget = min( spatialTarget, spatialUpper );
@@ -421,9 +384,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 float roughDiffuseResponse = Math::SmoothStep( 0.20, 0.50, roughness );
                 float maximumResponse = lerp( 0.10, 0.25, roughDiffuseResponse );
                 maximumResponse = materialID > 0.5 ? min( maximumResponse, 0.06 ) : maximumResponse;
-                // This older luminance ratio remains useful for transparent
-                // materials, but it cannot distinguish a new stochastic path
-                // from a real opaque-lighting rise.
                 float temporalLightingConfirmation = Math::SmoothStep(
                     0.006, 0.04,
                     diffLumaRiseReference /
@@ -436,35 +396,17 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 maximumResponse = lerp(
                     maximumResponse, coherentMaximumResponse,
                     coherentLightingChange );
-                // For opaque diffuse, the first two observations are buffered
-                // without changing luminance. The response opens on the third
-                // observation at the reprojected surface point.
-                // A one-frame or walking checker island therefore never
-                // becomes visible merely because it filled the spatial guide.
                 #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
                     float persistentLightingConfirmation = Math::SmoothStep(
                         0.80, 0.99, diffRisePersistence );
-                    // Keep ordinary low-amplitude Monte-Carlo convergence
-                    // symmetric. Only a rise strong enough to become a
-                    // visible island is frozen while it is unconfirmed;
-                    // otherwise suppressing every positive fluctuation while
-                    // accepting decreases would bias a stable surface dark.
                     float suspiciousLightingRise = Math::SmoothStep(
                         0.35, 0.70,
                         max( coherentLightingChange,
                             currentLightingChange ) );
                     float unconfirmedLightingRise = suspiciousLightingRise *
                         ( 1.0 - persistentLightingConfirmation );
-                    // Ordinary low-amplitude convergence must not wait for a
-                    // persistence vote. Apply the cross-frame gate only in
-                    // proportion to how strongly the rise resembles a
-                    // visible reconstructed island.
                     float persistentResponseGate =
                         1.0 - unconfirmedLightingRise;
-                    // Preserve long-term diffuse energy through NRD's
-                    // existing 0.3% convergence floor. This is far too slow
-                    // to reveal a walking island; only the old coherent 8%
-                    // path needs to remain closed until confirmation.
                     float opaqueResponseFloor = 0.003;
                 #else
                     float persistentLightingConfirmation = 1.0;
@@ -485,9 +427,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                     maximumResponse = min(
                         maximumResponse, opaqueResponseCap );
                 }
-                // Bound an unconfirmed opaque path to its sub-visible
-                // convergence floor. Other material classes keep the
-                // convergence floor used by the existing tuning.
                 float minimumResponse = 0.003;
                 #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
                     minimumResponse = materialID < 0.5 ?
@@ -498,10 +437,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 float frameResponse = 1.0 - pow( 1.0 - baseResponse, temporalFrameScale );
                 float temporalRise = max( spatialTarget - diffLumaRiseReference, 0.0 ) *
                     frameResponse;
-                // At the 5.0 EV display lift, NRD's old 5e-5 dark-signal
-                // allowance becomes a visible code-value jump. Keep a tiny
-                // convergence floor; material lighting still uses the
-                // proportional response above.
                 float absoluteAllowance = lerp(
                     0.000008, 0.000015, roughDiffuseResponse );
                 #if( NRD_MODE == RADIANCE || NRD_MODE == SH )
@@ -513,9 +448,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 diffLumaStabilized = min( diffLumaStabilized, temporalUpper );
             }
 
-            // Do not retain a bright temporal island after current spatial
-            // evidence has fallen. Luminance decreases are intentionally
-            // immediate, which removes the moving tail that reads as crawling.
             if( diffSpatialReliability > 0.0 && diffLumaRiseReference > spatialUpper )
                 diffLumaStabilized = min( diffLumaStabilized, max( diffLuma, spatialUpper ) );
         }
@@ -775,18 +707,11 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                     specLumaStabilized = min(
                         specLumaStabilized, disocclusionUpper );
                 else
-                    // A broad current lobe still needs one bounded start when
-                    // its reprojected wall history is invalid; otherwise a
-                    // checker sample flashes exactly along moving wall edges.
                     specLumaStabilized = min(
                         specLumaStabilized,
                         lerp( disocclusionUpper, spatialUpper, 0.20 ) );
             }
 
-            // As with diffuse, the current guide cannot validate neighbouring
-            // previous-frame history taps. Confirm a glossy rise only with the
-            // centre reprojection, which has already passed NRD's SMB/VMB
-            // footprint tests.
             float specTemporalConfirmation = transparentGlossy ? 1.0 :
                 Math::SmoothStep(
                     0.15, 0.55,
@@ -797,11 +722,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 specTemporalConfirmation *= historyValidity *
                     Math::SmoothStep( 2.0, 8.0, data1.y );
 
-            // Low-roughness reflections can otherwise preserve an initially
-            // dark Monte-Carlo island indefinitely. Reuse the guide-fitted
-            // 5x5 moments to fill only a dark centre when its own reprojected
-            // history already carries the same energy. A current one-frame
-            // pulse can therefore neither fill nor brighten its neighbours.
             if( opaqueLowRoughness && historyValidity > 0.25 &&
                 specSpatialReliability > 0.0 &&
                 specGuideLumaM1 > specLumaStabilized )

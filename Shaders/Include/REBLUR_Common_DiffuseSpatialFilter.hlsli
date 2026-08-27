@@ -66,9 +66,6 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
         bool opaqueDiffuseStabilization = materialID < 0.5;
         if( gEnableLowRoughnessSpecularStabilization != 0 &&
             opaqueDiffuseStabilization )
-            // Eight Poisson taps remain unchanged. Radius 2 keeps each pass
-            // inside a 5x5 footprint while preventing mature diffuse history
-            // from collapsing to a nearly single-pixel filter.
             blurRadius = max( blurRadius, 2.0 );
     #endif
 
@@ -87,9 +84,6 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
     #if( REBLUR_SPATIAL_MODE != REBLUR_PRE_BLUR )
         if( gEnableLowRoughnessSpecularStabilization != 0 &&
             opaqueDiffuseStabilization )
-            // Continuation hit distance is stochastic, not a surface guide.
-            // Keep a small contribution from same-normal, same-plane taps so
-            // a fixed hit-distance pattern cannot become a dark wall stain.
             minHitDistWeight = max( minHitDistWeight,
                 lerp( 0.12, 0.25, Math::SmoothStep( 4.0, 12.0, data1.x ) ) );
     #endif
