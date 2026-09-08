@@ -314,7 +314,6 @@ struct ReblurSettings {
     bool returnHistoryLengthInsteadOfOcclusion = false;
 
     bool enableLowRoughnessSpecularStabilization = false;
-    // Preserve directional radiance carried by half-rate transparent diffuse inputs.
     bool enableHalfRateTransmission = false;
 };
 
@@ -461,4 +460,4 @@ struct ReferenceSettings {
     // (>= 0) - maximum number of linearly accumulated frames
     uint32_t maxAccumulatedFrameNum = 120;
 };
-} // namespace nrd
+}

@@ -74,7 +74,7 @@ void Preload( uint2 sharedPos, int2 globalPos )
 
         float viewZ = UnpackViewZ( gIn_ViewZ[ WithRectOrigin( globalPos ) ] );
 
-        hitDistForTracking = ( hitDist == 0.0 || !( viewZ < gDenoisingRange ) ) ? NRD_INF : hitDist; // for "min"
+        hitDistForTracking = ( hitDist == 0.0 || !( viewZ < gDenoisingRange ) ) ? NRD_INF : hitDist;
     #endif
 
     s_Normal_HitDistForTracking[ sharedPos.y ][ sharedPos.x ] = float4( N, hitDistForTracking );
@@ -119,7 +119,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             float4 data = s_Normal_HitDistForTracking[ pos.y ][ pos.x ];
 
             // Average normal
-            if( i < 2 && j < 2 ) // TODO: 3x3?
+            if( i < 2 && j < 2 )
                 Navg += data.xyz * 0.25;
 
             #if( NRD_SPEC )
@@ -311,7 +311,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float4 smbOcclusionWeights = Filtering::GetBilinearCustomWeights( smbBilinearFilter, float4( smbOcclusion0.z, smbOcclusion1.y, smbOcclusion2.y, smbOcclusion3.x ) );
     bool smbAllowCatRom = dot( smbOcclusion0 + smbOcclusion1 + smbOcclusion2 + smbOcclusion3, 1.0 ) > 11.5 && REBLUR_USE_CATROM_FOR_SURFACE_MOTION_IN_TA;
 
-    // Save disocclusion bits
     float fbits = smbOcclusion0.z * 1.0;
     fbits += smbOcclusion1.y * 2.0;
     fbits += smbOcclusion2.y * 4.0;
@@ -515,7 +514,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
             // Mix
             float2 ww = abs( deltaUv ) + 1.0 / 256.0;
-            ww /= ww.x + ww.y; // TODO: perspective correction?
+            ww /= ww.x + ww.y;
 
             float3 x = x10 * ww.x + x01 * ww.y;
             float3 n = normalize( n10 * ww.x + n01 * ww.y );
@@ -793,7 +792,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             //a = acos( saturate( dot( V, smbVprev ) ) ); // numerically unstable
 
             float nonLinearAccumSpeed = 1.0 / ( 1.0 + smbSpecAccumSpeed );
-            float hPrev = ExtractHitDist( gHistory_Spec.SampleLevel( gLinearClamp, smbPixelUv * gResolutionScalePrev, 0 ) ); // this is safe because "history" is always "cleared" on startup, the rest is handled by "lerp" below
+            float hPrev = ExtractHitDist( gHistory_Spec.SampleLevel( gLinearClamp, smbPixelUv * gResolutionScalePrev, 0 ) );
             float h = lerp( hPrev, ExtractHitDist( spec ), nonLinearAccumSpeed ) * hitDistNormalization;
 
             float tana0 = ImportanceSampling::GetSpecularLobeTanHalfAngle( roughnessModified, NRD_MAX_PERCENT_OF_LOBE_VOLUME ); // base lobe angle
@@ -806,7 +805,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             float f = Math::LinearStep( a0, 0.0, a );
             surfaceHistoryConfidence = Math::Pow01( f, 4.0 );
 
-            // Lerp to "1" for very high roughness, where specular motion regresses to surface motion ( test 236 )
             f = Math::LinearStep( 0.8, 0.9, roughnessModified );
             surfaceHistoryConfidence = lerp( surfaceHistoryConfidence, 1.0, f );
         }
@@ -984,7 +982,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 specShResult *= GetLumaScale( length( specShResult ), specLumaClamped );
             #endif
 
-            // This is required for "hit distance weight" to work
             float specHitDistMaxRelativeIntensity = 1.2 + 1.0 / ( specAccumSpeed + 1.0 );
             specResult.w = lerp( specResult.w, min( specResult.w, specHistory.w * specHitDistMaxRelativeIntensity ), specAntifireflyFactor );
         }
@@ -1179,7 +1176,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
                 diffShResult *= GetLumaScale( length( diffShResult ), diffLumaClamped );
             #endif
 
-            // This is required for "hit distance weight" to work
             float diffHitDistMaxRelativeIntensity = 1.2 + 1.0 / ( diffAccumSpeed + 1.0 );
             diffResult.w = lerp( diffResult.w, min( diffResult.w, diffHistory.w * diffHitDistMaxRelativeIntensity ), diffAntifireflyFactor );
         #endif

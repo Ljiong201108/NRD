@@ -61,9 +61,6 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
         // Blur radius - addition to avoid underblurring
         blurRadius = max(blurRadius, gMinBlurRadius);
 
-        // Only the paired environment carrier has deterministic silhouettes.
-        // Finite-hit transmission still contains stochastic indirect lighting
-        // and needs spatial denoising even through a smooth interface.
         if (gEnableHalfRateTransmission != 0 && materialID > 2.5 && roughness < 0.12)
             blurRadius = 0.0;
 
