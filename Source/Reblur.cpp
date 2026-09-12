@@ -315,6 +315,9 @@ void nrd::InstanceImpl::AddSharedConstants_Reblur(const ReblurSettings& settings
             break;
     }
 
+    if (settings.enableHalfRateTransmission && diffCheckerboard != 2)
+        specCheckerboard = diffCheckerboard;
+
     SharedConstants* consts = (SharedConstants*)data;
     consts->gWorldToClip = m_WorldToClip;
     consts->gViewToClip = m_ViewToClip;
