@@ -82,7 +82,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
         blurRadius = max( blurRadius, gMinBlurRadius * smc );
 
     #if( REBLUR_SPATIAL_MODE != REBLUR_PRE_BLUR )
-        bool transparentGlossyStabilization = materialID > 0.5 && materialID < 2.5 && roughness <= 0.45;
+        bool transparentGlossyStabilization = materialID > 0.5 && roughness <= 0.45;
         bool opaqueLowRoughnessStabilization = materialID < 0.5 && roughness <= 0.12;
         float glossyHistoryDeficit = 0.0;
         if( gEnableLowRoughnessSpecularStabilization != 0 && ( transparentGlossyStabilization || opaqueLowRoughnessStabilization ) )

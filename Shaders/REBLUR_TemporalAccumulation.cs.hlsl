@@ -134,7 +134,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float4 normalAndRoughness = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ WithRectOrigin( pixelPos ) ], materialID );
     float3 N = normalAndRoughness.xyz;
     float roughness = normalAndRoughness.w;
-    bool lowRoughnessSurfaceGuide = materialID < 0.5 || ( materialID > 1.5 && materialID < 2.5 );
+    bool lowRoughnessSurfaceGuide = materialID < 0.5 || materialID > 1.5;
     bool opaqueLowRoughness = materialID < 0.5 && roughness <= 0.12;
     float guidedSpecularRoughnessLimit = materialID > 1.5 ? 0.45 : 0.12;
 
@@ -1056,6 +1056,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             diffHistoryConfidence = min( diffHistoryConfidence, confidence );
         }
         diffAccumSpeed *= lerp( diffHistoryConfidence, 1.0, 1.0 / ( 1.0 + diffAccumSpeed ) );
+        diffAccumSpeed = min( diffAccumSpeed, gMaxAccumulatedFrameNum );
 
         // Current
         bool diffHasData = NRD_SUPPORTS_CHECKERBOARD == 0 || gDiffCheckerboard == 2 || checkerboard == gDiffCheckerboard;

@@ -258,27 +258,23 @@ void Preload(uint2 sharedPos, int2 globalPos) {
 
             float sigma = GetStdDev(m1, m2) * REBLUR_ANTI_FIREFLY_SIGMA_SCALE;
             diffLuma = clamp(diffLuma, m1 - sigma, m1 + sigma);
-        } else if (gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 && diffLuma > 0.005 && !smoothTransmission) {
-            float logM1 = 0.0;
-            float logM2 = 0.0;
-
+        } else if (gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 && diffLuma > 0.001 && !smoothTransmission) {
+            float m1 = 0.0, m2 = 0.0, largest = 0.0, secondLargest = 0.0;
             [unroll] for (j = 0; j <= BORDER * 2; j++) {
                 [unroll] for (i = 0; i <= BORDER * 2; i++) {
                     if (i == BORDER && j == BORDER)
                         continue;
-
-                    float d = max(Denanify(1.0, s_DiffLuma[threadPos.y + j][threadPos.x + i]), 0.0);
-                    float logLuma = log2(max(d, 1e-5));
-                    logM1 += logLuma;
-                    logM2 += logLuma * logLuma;
+                    float value = max(Denanify(1.0, s_DiffLuma[threadPos.y + j][threadPos.x + i]), 0.0);
+                    m1 += value;
+                    m2 += value * value;
+                    secondLargest = max(secondLargest, min(largest, value));
+                    largest = max(largest, value);
                 }
             }
-
-            const float invNeighborCount = 1.0 / ((BORDER * 2 + 1) * (BORDER * 2 + 1) - 1);
-            logM1 *= invNeighborCount;
-            logM2 *= invNeighborCount;
-            float robustSigma = GetStdDev(logM1, logM2);
-            float robustUpper = max(exp2(logM1 + robustSigma * 0.55) * 1.5, 0.001);
+            const float invTrimmedCount = 1.0 / ((BORDER * 2 + 1) * (BORDER * 2 + 1) - 2);
+            m1 = (m1 - largest) * invTrimmedCount;
+            m2 = (m2 - largest * largest) * invTrimmedCount;
+            float robustUpper = max(secondLargest * 2.0, m1 + GetStdDev(m1, m2) * 3.0) + 0.001;
             diffLuma = min(diffLuma, robustUpper);
         }
 
@@ -291,8 +287,6 @@ void Preload(uint2 sharedPos, int2 globalPos) {
         float diffMax = diffM1 + diffSigma;
 
         float diffLumaClamped = clamp(diffLuma, diffMin, diffMax);
-        if (materialID < 0.5 && roughness > 0.12)
-            diffLumaClamped = diffLuma;
         diffLuma = lerp(diffLumaClamped, diffLuma, 1.0 / (1.0 + float(gMaxFastAccumulatedFrameNum < gMaxAccumulatedFrameNum) * frameNum.x * 2.0));
 
 // Change luma
@@ -324,7 +318,7 @@ void Preload(uint2 sharedPos, int2 globalPos) {
         float smc = GetSpecMagicCurve(roughness);
         float specNonLinearAccumSpeed = 1.0 / (1.0 + frameNum.y);
         float robustLowHistorySpecularStrength = 0.0;
-        bool transparentLowRoughness = materialID > 0.5 && materialID < 2.5 && roughness <= 0.45;
+        bool transparentLowRoughness = materialID > 0.5 && roughness <= 0.45;
         bool opaqueLowRoughness = materialID < 0.5 && roughness <= 0.12;
         if (gEnableLowRoughnessSpecularStabilization != 0 && (transparentLowRoughness || opaqueLowRoughness)) {
             robustLowHistorySpecularStrength = saturate(1.0 - frameNum.y / 24.0);
@@ -519,27 +513,23 @@ void Preload(uint2 sharedPos, int2 globalPos) {
                 specLuma = lerp(specLuma, filteredLuma, robustLowHistorySpecularStrength);
             } else
                 specLuma = clamp(specLuma, m1 - sigma, m1 + sigma);
-        } else if (gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 && roughOpaqueSpecular && specLuma > 0.005) {
-            float logM1 = 0.0;
-            float logM2 = 0.0;
-
+        } else if (gAntiFirefly && NRD_SUPPORTS_ANTIFIREFLY == 1 && roughOpaqueSpecular && specLuma > 0.001) {
+            float m1 = 0.0, m2 = 0.0, largest = 0.0, secondLargest = 0.0;
             [unroll] for (j = 0; j <= BORDER * 2; j++) {
                 [unroll] for (i = 0; i <= BORDER * 2; i++) {
                     if (i == BORDER && j == BORDER)
                         continue;
-
-                    float s = max(Denanify(1.0, s_SpecLuma[threadPos.y + j][threadPos.x + i]), 0.0);
-                    float logLuma = log2(max(s, 1e-5));
-                    logM1 += logLuma;
-                    logM2 += logLuma * logLuma;
+                    float value = max(Denanify(1.0, s_SpecLuma[threadPos.y + j][threadPos.x + i]), 0.0);
+                    m1 += value;
+                    m2 += value * value;
+                    secondLargest = max(secondLargest, min(largest, value));
+                    largest = max(largest, value);
                 }
             }
-
-            const float invNeighborCount = 1.0 / ((BORDER * 2 + 1) * (BORDER * 2 + 1) - 1);
-            logM1 *= invNeighborCount;
-            logM2 *= invNeighborCount;
-            float robustSigma = GetStdDev(logM1, logM2);
-            float robustUpper = max(exp2(logM1 + robustSigma * 0.55) * 1.5, 0.001);
+            const float invTrimmedCount = 1.0 / ((BORDER * 2 + 1) * (BORDER * 2 + 1) - 2);
+            m1 = (m1 - largest) * invTrimmedCount;
+            m2 = (m2 - largest * largest) * invTrimmedCount;
+            float robustUpper = max(secondLargest * 2.0, m1 + GetStdDev(m1, m2) * 3.0) + 0.001;
             specLuma = min(specLuma, robustUpper);
         }
 
