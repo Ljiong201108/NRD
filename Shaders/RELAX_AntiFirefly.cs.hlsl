@@ -118,8 +118,6 @@ void runRCRS(
 #endif
 
             float sampleMaterialID = s_MaterialID[sharedMemoryIndexSample.y][sharedMemoryIndexSample.x];
-            // Rank only samples from this surface. Otherwise an isolated dark
-            // face is replaced by its bright background on every frame.
             float4 centerGuide = s_Normal_ViewZ[sharedMemoryIndex.y][sharedMemoryIndex.x];
             float4 sampleGuide = s_Normal_ViewZ[sharedMemoryIndexSample.y][sharedMemoryIndexSample.x];
             int2 samplePixel = clamp(pixelPos + int2(xx, yy), 0, int2(gRectSize) - 1);
@@ -174,8 +172,6 @@ void runRCRS(
         specularCoords = maxSpecularLuminanceCoords;
     if(specularLuminanceCenter < minSpecularLuminance)
         specularCoords = minSpecularLuminanceCoords;
-    // One surviving neighbor is weak evidence of a firefly. Blend the
-    // correction by support instead of replacing the center with that sample.
     outSpecular = float4(lerp(specularIlluminationCenter,
         s_Spec[specularCoords.y][specularCoords.x].rgb, saturate(specularSupport / 3.0)), specular2ndMomentCenter);
 #endif
@@ -186,8 +182,6 @@ void runRCRS(
         diffuseCoords = maxDiffuseLuminanceCoords;
     if(diffuseLuminanceCenter < minDiffuseLuminance)
         diffuseCoords = minDiffuseLuminanceCoords;
-    // One surviving neighbor is weak evidence of a firefly. Blend the
-    // correction by support instead of replacing the center with that sample.
     outDiffuse = float4(lerp(diffuseIlluminationCenter,
         s_Diff[diffuseCoords.y][diffuseCoords.x].rgb, saturate(diffuseSupport / 3.0)), diffuse2ndMomentCenter);
 #endif

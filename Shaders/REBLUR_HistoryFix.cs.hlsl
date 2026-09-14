@@ -45,7 +45,6 @@ void Preload(uint2 sharedPos, int2 globalPos) {
 // Tests 20, 23, 24, 27, 28, 54, 59, 65, 66, 76, 81, 98, 112, 117, 124, 126, 128, 134
 // TODO: potentially do color clamping after reconstruction in a separate pass
 
-// Variance statistics must describe the center surface, including at cutout edges.
 float GetSurfaceWeight(int2 sharedPos, int2 pixelPos, float3 Xv, float3 Nv, float3 N, float materialID, float minMaterial) {
     float sampleViewZ = s_ViewZ[sharedPos.y][sharedPos.x];
     float4 guide = s_Normal_Material[sharedPos.y][sharedPos.x];
@@ -302,8 +301,6 @@ float GetSurfaceWeight(int2 sharedPos, int2 pixelPos, float3 Xv, float3 Nv, floa
         diffM2 /= diffWeight;
 
         float diffSigma = GetStdDev(diffM1, diffM2) * gFastHistoryClampingSigmaScale;
-        // A small surface can be the only representative of its illumination
-        // in the window. Its fast history must remain inside the clamp interval.
         float diffMin = min(diffM1 - diffSigma, diffCenter);
         float diffMax = max(diffM1 + diffSigma, diffCenter);
 
@@ -566,8 +563,6 @@ float GetSurfaceWeight(int2 sharedPos, int2 pixelPos, float3 Xv, float3 Nv, floa
             fastHistoryClampingSigmaScale = max(fastHistoryClampingSigmaScale, 3.0);
 
         float specSigma = GetStdDev(specM1, specM2) * fastHistoryClampingSigmaScale;
-        // A small surface can be the only representative of its illumination
-        // in the window. Its fast history must remain inside the clamp interval.
         float specMin = min(specM1 - specSigma, specCenter);
         float specMax = max(specM1 + specSigma, specCenter);
 

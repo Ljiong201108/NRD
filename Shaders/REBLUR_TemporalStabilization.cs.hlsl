@@ -205,7 +205,6 @@ void Preload(uint2 sharedPos, int2 globalPos) {
     float diffLumaRiseReference = smbDiffLumaHistory;
 
     // Compute antilag
-    // A different surface's illumination is not evidence of a lighting change.
     float diffAntilag = ComputeAntilag(smbDiffLumaHistory, diffGuideLumaM1, diffGuideLumaSigma, smbFootprintQuality * data1.x);
     float coherentLightingChange = 0.0;
     if (materialID < 0.5 && diffSpatialReliability > 0.0) {
@@ -228,8 +227,6 @@ void Preload(uint2 sharedPos, int2 globalPos) {
     diffHistoryWeight *= float(pixelUv.x >= gSplitScreen);
     diffHistoryWeight *= float(smbPixelUv.x >= gSplitScreenPrev);
 
-    // Include this surface's current estimate when neighboring surfaces
-    // dominate the variance window (thin silhouettes and isolated pixels).
     float diffClampSigma = diffLumaSigma * diffTemporalAccumulationParams.y;
     smbDiffLumaHistory = clamp(smbDiffLumaHistory, min(diffLumaM1 - diffClampSigma, diffLuma),
         max(diffLumaM1 + diffClampSigma, diffLuma));
@@ -608,8 +605,6 @@ void Preload(uint2 sharedPos, int2 globalPos) {
 
     specHistoryWeight *= acceleration;
 
-    // Include this surface's current estimate when neighboring surfaces
-    // dominate the variance window (thin silhouettes and isolated pixels).
     float specClampSigma = specLumaSigma * specTemporalAccumulationParams.y;
     specLumaHistory = clamp(specLumaHistory, min(specLumaM1 - specClampSigma, specLuma),
         max(specLumaM1 + specClampSigma, specLuma));

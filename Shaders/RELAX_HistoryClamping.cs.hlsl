@@ -127,8 +127,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             w = diffuseNoisySample.w; // yes, overwrite to the same value
         #endif
 
-            // Illumination on an unrelated background must not reset or accelerate
-            // the history of a narrow foreground surface.
             float centerViewZ = s_ViewZ[sharedMemoryIndex.y][sharedMemoryIndex.x];
             float sampleViewZ = s_ViewZ[sharedMemoryIndexP.y][sharedMemoryIndexP.x];
             float4 centerGuide = s_Normal_Material[sharedMemoryIndex.y][sharedMemoryIndex.x];

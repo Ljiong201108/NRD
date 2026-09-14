@@ -130,8 +130,6 @@ float loadSurfaceMotionBasedPrevData(
     float bicubicFootprintValid = dot(tapsValid0 + tapsValid1 + tapsValid2 + tapsValid3, 1.0) > 11.5 ? 1.0 : 0.0;
     float4 bilinearTapsValid = float4(tapsValid0.z, tapsValid1.y, tapsValid2.y, tapsValid3.x);
 
-    // Average only the geometry-compatible history taps. Neighboring geometry
-    // through alpha-tested holes is not part of this surface's normal guide.
     Filtering::Bilinear normalFilter;
     normalFilter.weights = bilinearWeights;
     float4 normalWeights = Filtering::GetBilinearCustomWeights(normalFilter, bilinearTapsValid);

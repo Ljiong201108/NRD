@@ -130,9 +130,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             if( i < 2 && j < 2 )
                 {
                 Navg += data.xyz * 0.25;
-                // A porous surface's normal must not be averaged with the
-                // geometry visible through its holes. Keep the normal-map
-                // averaging on its own plane, rather than using a single tap.
                 int2 samplePos = clamp( int2(pixelPos) + int2(i, j) - BORDER, 0, gRectSizeMinusOne );
                 float sampleViewZ = s_GuideViewZ[ pos.y ][ pos.x ];
                 float3 sampleXv = Geometry::ReconstructViewPosition( (samplePos + 0.5) * gRectSizeInv, gFrustum, sampleViewZ, gOrthoMode );
@@ -196,8 +193,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         smbPixelUv = Geometry::GetScreenUv( gWorldToClipPrev, Xprev );
     }
 
-    // History guides are sampled at last frame's jitter, while mv and Xprev
-    // above describe physical motion. Keep those coordinate systems separate.
     float2 smbSampleUv = smbPixelUv + gHistoryJitter;
     // Previous viewZ ( 4x4, surface motion )
     /*
@@ -230,7 +225,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float smbNoN;
     float4 smbNoN2x2;
     {
-        // Preserve a plane-consistent normal average at sparse geometry edges.
         float3 Nt = _NRD_SafeNormalize( reprojectionNormal );
 
         #if( NRD_USE_PREV_WORLD_SPACE_MATRIX == 1 )
@@ -326,8 +320,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         uint4 smbInternalData = gPrev_InternalData.GatherRed( gNearestClamp, smbBilinearGatherUv ).wzxy;
     #endif
 
-    // Depth alone accepts neighboring leaf planes at grazing angles. Validate
-    // the inner taps against this surface's tangent plane before normalizing.
     float3 normalViewPrev = Geometry::RotateVector(gWorldToViewPrev, N);
     float4 planeTaps;
     float4 innerViewZ = float4(smbViewZ0.w, smbViewZ1.z, smbViewZ2.y, smbViewZ3.x);
@@ -420,8 +412,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     // Specular
     #if( NRD_SPEC )
         // Accumulation speed
-        // Bound the amount of history by support instead of discounting its
-        // age every frame. Keep motion/stretching and application confidence.
         float smbSpecHistoryLimit = min(gMaxAccumulatedFrameNum,
             max(gHistoryFixFrameNum + 1.0, gMaxAccumulatedFrameNum * pow(smbFootprintQuality / sizeQuality, 4.0)));
         smbSpecAccumSpeed = min(smbSpecAccumSpeed, smbSpecHistoryLimit);
@@ -1094,8 +1084,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     // Diffuse
     #if( NRD_DIFF )
         // Accumulation speed
-        // Bound the amount of history by support instead of discounting its
-        // age every frame. Keep motion/stretching and application confidence.
         float diffHistoryLimit = min(gMaxAccumulatedFrameNum,
             max(gHistoryFixFrameNum + 1.0, gMaxAccumulatedFrameNum * pow(smbFootprintQuality / sizeQuality, 4.0)));
         diffAccumSpeed = min(diffAccumSpeed, diffHistoryLimit);
@@ -1197,8 +1185,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             }
         #endif
 
-        // A checkerboard hole with no compatible prepass neighbors is missing
-        // data, not a black measurement. Retain validated history until sampled.
         bool diffMissing = !diffHasData && !any(diff != 0.0) && diffAccumSpeed > 0.0;
         diffNonLinearAccumSpeed *= float(!diffMissing);
         REBLUR_TYPE diffResult = MixHistoryAndCurrent( diffHistory, diff, diffNonLinearAccumSpeed );
