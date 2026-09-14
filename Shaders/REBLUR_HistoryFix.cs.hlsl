@@ -21,6 +21,8 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 groupshared float s_DiffLuma[BUFFER_Y][BUFFER_X];
 groupshared float s_SpecLuma[BUFFER_Y][BUFFER_X];
 groupshared float2 s_FrameNum[BUFFER_Y][BUFFER_X];
+groupshared float4 s_Normal_Material[BUFFER_Y][BUFFER_X];
+groupshared float s_ViewZ[BUFFER_Y][BUFFER_X];
 
 void Preload(uint2 sharedPos, int2 globalPos) {
     globalPos = clamp(globalPos, 0, gRectSizeMinusOne);
@@ -34,10 +36,24 @@ void Preload(uint2 sharedPos, int2 globalPos) {
 #endif
 
     s_FrameNum[sharedPos.y][sharedPos.x] = UnpackData1(gIn_Data1[globalPos]);
+    float materialID;
+    float3 normal = NRD_FrontEnd_UnpackNormalAndRoughness(gIn_Normal_Roughness[WithRectOrigin(globalPos)], materialID).xyz;
+    s_Normal_Material[sharedPos.y][sharedPos.x] = float4(normal, materialID);
+    s_ViewZ[sharedPos.y][sharedPos.x] = UnpackViewZ(gIn_ViewZ[WithRectOrigin(globalPos)]);
 }
 
 // Tests 20, 23, 24, 27, 28, 54, 59, 65, 66, 76, 81, 98, 112, 117, 124, 126, 128, 134
 // TODO: potentially do color clamping after reconstruction in a separate pass
+
+// Variance statistics must describe the center surface, including at cutout edges.
+float GetSurfaceWeight(int2 sharedPos, int2 pixelPos, float3 Xv, float3 Nv, float3 N, float materialID, float minMaterial) {
+    float sampleViewZ = s_ViewZ[sharedPos.y][sharedPos.x];
+    float4 guide = s_Normal_Material[sharedPos.y][sharedPos.x];
+    pixelPos = clamp(pixelPos, 0, gRectSizeMinusOne);
+    float3 sampleXv = Geometry::ReconstructViewPosition((pixelPos + 0.5) * gRectSizeInv, gFrustum, sampleViewZ, gOrthoMode);
+    return float(sampleViewZ < gDenoisingRange && abs(dot(Nv, sampleXv - Xv)) <= max(NRD_DISOCCLUSION_THRESHOLD * abs(Xv.z), NRD_EPS)
+        && dot(N, guide.xyz) > 0.0) * CompareMaterials(materialID, guide.w, minMaterial);
+}
 
 [numthreads(GROUP_X, GROUP_Y, 1)] NRD_EXPORT void NRD_CS_MAIN(NRD_CS_MAIN_ARGS) {
     NRD_CTA_ORDER_REVERSED;
@@ -207,6 +223,7 @@ void Preload(uint2 sharedPos, int2 globalPos) {
         float diffCenter = s_DiffLuma[threadPos.y + BORDER][threadPos.x + BORDER];
         float diffM1 = diffCenter;
         float diffM2 = diffM1 * diffM1;
+        float diffWeight = 1.0;
 
         float f = frameNumAvgNorm.x;
         diffCenter = lerp(GetLuma(diff), diffCenter, f);
@@ -221,8 +238,10 @@ void Preload(uint2 sharedPos, int2 globalPos) {
                 int2 pos = threadPos + int2(i, j);
 
                 float d = s_DiffLuma[pos.y][pos.x];
-                diffM1 += d;
-                diffM2 += d * d;
+                float w = GetSurfaceWeight(pos, int2(pixelPos) + int2(i, j) - BORDER, Xv, Nv, N, materialID, gDiffMinMaterial);
+                diffM1 += d * w;
+                diffM2 += d * d * w;
+                diffWeight += w;
             }
         }
 
@@ -279,12 +298,14 @@ void Preload(uint2 sharedPos, int2 globalPos) {
         }
 
         // Fast history
-        diffM1 /= (BORDER * 2 + 1) * (BORDER * 2 + 1);
-        diffM2 /= (BORDER * 2 + 1) * (BORDER * 2 + 1);
+        diffM1 /= diffWeight;
+        diffM2 /= diffWeight;
 
         float diffSigma = GetStdDev(diffM1, diffM2) * gFastHistoryClampingSigmaScale;
-        float diffMin = diffM1 - diffSigma;
-        float diffMax = diffM1 + diffSigma;
+        // A small surface can be the only representative of its illumination
+        // in the window. Its fast history must remain inside the clamp interval.
+        float diffMin = min(diffM1 - diffSigma, diffCenter);
+        float diffMax = max(diffM1 + diffSigma, diffCenter);
 
         float diffLumaClamped = clamp(diffLuma, diffMin, diffMax);
         diffLuma = lerp(diffLumaClamped, diffLuma, 1.0 / (1.0 + float(gMaxFastAccumulatedFrameNum < gMaxAccumulatedFrameNum) * frameNum.x * 2.0));
@@ -452,6 +473,7 @@ void Preload(uint2 sharedPos, int2 globalPos) {
         float specCenter = s_SpecLuma[threadPos.y + BORDER][threadPos.x + BORDER];
         float specM1 = specCenter;
         float specM2 = specM1 * specM1;
+        float specWeight = 1.0;
 
         float f = frameNumAvgNorm.y;
         f = lerp(1.0, f, smc); // HistoryFix-ed data is undesired in fast history for low roughness ( test 115 )
@@ -467,8 +489,10 @@ void Preload(uint2 sharedPos, int2 globalPos) {
                 int2 pos = threadPos + int2(i, j);
 
                 float s = s_SpecLuma[pos.y][pos.x];
-                specM1 += s;
-                specM2 += s * s;
+                float w = GetSurfaceWeight(pos, int2(pixelPos) + int2(i, j) - BORDER, Xv, Nv, N, materialID, gSpecMinMaterial);
+                specM1 += s * w;
+                specM2 += s * s * w;
+                specWeight += w;
             }
         }
 
@@ -507,7 +531,7 @@ void Preload(uint2 sharedPos, int2 globalPos) {
             float sigma = GetStdDev(m1, m2) * sigmaScale;
             if (useRobustLowHistorySpecular) {
                 float ringUpper = exp2(m1 + sigma);
-                float neighborMean = max((specM1 - specCenter) / ((BORDER * 2 + 1) * (BORDER * 2 + 1) - 1), 0.0);
+                float neighborMean = max((specM1 - specCenter) / max(specWeight - 1.0, 1.0), 0.0);
                 float coherentUpper = neighborMean * 1.30 + 0.0002;
                 float filteredLuma = min(specLuma, max(ringUpper, coherentUpper));
                 specLuma = lerp(specLuma, filteredLuma, robustLowHistorySpecularStrength);
@@ -534,16 +558,18 @@ void Preload(uint2 sharedPos, int2 globalPos) {
         }
 
         // Fast history
-        specM1 /= (BORDER * 2 + 1) * (BORDER * 2 + 1);
-        specM2 /= (BORDER * 2 + 1) * (BORDER * 2 + 1);
+        specM1 /= specWeight;
+        specM2 /= specWeight;
 
         float fastHistoryClampingSigmaScale = gFastHistoryClampingSigmaScale;
         if (materialID == gStrandMaterialID)
             fastHistoryClampingSigmaScale = max(fastHistoryClampingSigmaScale, 3.0);
 
         float specSigma = GetStdDev(specM1, specM2) * fastHistoryClampingSigmaScale;
-        float specMin = specM1 - specSigma;
-        float specMax = specM1 + specSigma;
+        // A small surface can be the only representative of its illumination
+        // in the window. Its fast history must remain inside the clamp interval.
+        float specMin = min(specM1 - specSigma, specCenter);
+        float specMax = max(specM1 + specSigma, specCenter);
 
         float specLumaClamped = clamp(specLuma, specMin, specMax);
         if (opaqueLowRoughness)

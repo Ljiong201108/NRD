@@ -192,6 +192,8 @@ void nrd::InstanceImpl::Add_RelaxDiffuseSpecular(DenoiserData& denoiserData) {
         PushInput(AsUint(Transient::SPEC_ILLUM_PONG)); // Responsive history
         PushInput(AsUint(Transient::DIFF_ILLUM_PONG));
 
+        PushInput(AsUint(ResourceType::IN_NORMAL_ROUGHNESS));
+
         // Outputs
         PushOutput(AsUint(Permanent::HISTORY_LENGTH_PREV));
         PushOutput(AsUint(Permanent::SPEC_ILLUM_PREV));

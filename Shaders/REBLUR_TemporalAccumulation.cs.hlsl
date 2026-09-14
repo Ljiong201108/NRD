@@ -19,6 +19,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #include "REBLUR_Common.hlsli"
 
 groupshared float4 s_Normal_HitDistForTracking[ BUFFER_Y ][ BUFFER_X ];
+groupshared float s_GuideViewZ[ BUFFER_Y ][ BUFFER_X ];
 
 float2 StochasticBilinear( float2 uv, float2 texSize )
 {
@@ -53,6 +54,7 @@ float GetLowRoughnessSpatialWeight( int2 pos, float materialID, float3 N, float 
 void Preload( uint2 sharedPos, int2 globalPos )
 {
     globalPos = clamp( globalPos, 0, gRectSizeMinusOne );
+    s_GuideViewZ[ sharedPos.y ][ sharedPos.x ] = UnpackViewZ( gIn_ViewZ[ WithRectOrigin( globalPos ) ] );
 
     float3 N = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ WithRectOrigin( globalPos ) ] ).xyz;
     float hitDistForTracking = 0.0;
@@ -103,6 +105,12 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float3 Xv = Geometry::ReconstructViewPosition( pixelUv, gFrustum, viewZ, gOrthoMode );
     float3 X = Geometry::RotateVector( gViewToWorld, Xv );
 
+    float materialID;
+    float4 normalAndRoughness = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ WithRectOrigin( pixelPos ) ], materialID );
+    float3 N = normalAndRoughness.xyz;
+    float roughness = normalAndRoughness.w;
+    float3 Nv = Geometry::RotateVectorInverse( gViewToWorld, N );
+    float3 reprojectionNormal = 0.0;
     // Find hit distance for tracking, averaged normal and roughness variance
     float3 Navg = 0.0; // needs to be unnormalized!
     #if( NRD_SPEC )
@@ -120,7 +128,18 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
             // Average normal
             if( i < 2 && j < 2 )
+                {
                 Navg += data.xyz * 0.25;
+                // A porous surface's normal must not be averaged with the
+                // geometry visible through its holes. Keep the normal-map
+                // averaging on its own plane, rather than using a single tap.
+                int2 samplePos = clamp( int2(pixelPos) + int2(i, j) - BORDER, 0, gRectSizeMinusOne );
+                float sampleViewZ = s_GuideViewZ[ pos.y ][ pos.x ];
+                float3 sampleXv = Geometry::ReconstructViewPosition( (samplePos + 0.5) * gRectSizeInv, gFrustum, sampleViewZ, gOrthoMode );
+                float planeDistance = abs( dot( Nv, sampleXv - Xv ) );
+                float w = float( sampleViewZ < gDenoisingRange && planeDistance <= max(NRD_DISOCCLUSION_THRESHOLD * viewZ, NRD_EPS) && dot(N, data.xyz) > 0.0 );
+                reprojectionNormal += data.xyz * w;
+            }
 
             #if( NRD_SPEC )
                 // Min hit distance for tracking, ignoring 0 values ( which still can be produced by VNDF sampling )
@@ -130,10 +149,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     }
 
     // Normal and roughness
-    float materialID;
-    float4 normalAndRoughness = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ WithRectOrigin( pixelPos ) ], materialID );
-    float3 N = normalAndRoughness.xyz;
-    float roughness = normalAndRoughness.w;
+
     bool lowRoughnessSurfaceGuide = materialID < 0.5 || materialID > 1.5;
     bool opaqueLowRoughness = materialID < 0.5 && roughness <= 0.12;
     float guidedSpecularRoughnessLimit = materialID > 1.5 ? 0.45 : 0.12;
@@ -180,6 +196,9 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         smbPixelUv = Geometry::GetScreenUv( gWorldToClipPrev, Xprev );
     }
 
+    // History guides are sampled at last frame's jitter, while mv and Xprev
+    // above describe physical motion. Keep those coordinate systems separate.
+    float2 smbSampleUv = smbPixelUv + gHistoryJitter;
     // Previous viewZ ( 4x4, surface motion )
     /*
           Gather      => CatRom12    => Bilinear
@@ -194,7 +213,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         2x 2y 3x 3y       2y 3x
            2z 3z
     */
-    Filtering::CatmullRom smbCatromFilter = Filtering::GetCatmullRomFilter( smbPixelUv, gRectSizePrev );
+    Filtering::CatmullRom smbCatromFilter = Filtering::GetCatmullRomFilter( smbSampleUv, gRectSizePrev );
     float2 smbCatromGatherUv = smbCatromFilter.origin * gResourceSizeInvPrev;
     float4 smbViewZ0 = gPrev_ViewZ.GatherRed( gNearestClamp, smbCatromGatherUv, float2( 1, 1 ) ).wzxy;
     float4 smbViewZ1 = gPrev_ViewZ.GatherRed( gNearestClamp, smbCatromGatherUv, float2( 3, 1 ) ).wzxy;
@@ -207,12 +226,12 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float3 prevViewZ3 = UnpackViewZ( smbViewZ3.xyz );
 
     // Previous normal averaged for all "in-range" pixels in 2x2 footprint
-    Filtering::Bilinear smbBilinearFilter = Filtering::GetBilinearFilter( smbPixelUv, gRectSizePrev );
+    Filtering::Bilinear smbBilinearFilter = Filtering::GetBilinearFilter( smbSampleUv, gRectSizePrev );
     float smbNoN;
     float4 smbNoN2x2;
     {
-        // TODO: currently "N" can't be used here, because of potential rejection of the entire footprint. See tests 27 and 28 at least ( under the frames on the wall )
-        float3 Nt = Navg; // IMPORTANT: yes, "Navg"
+        // Preserve a plane-consistent normal average at sparse geometry edges.
+        float3 Nt = _NRD_SafeNormalize( reprojectionNormal );
 
         #if( NRD_USE_PREV_WORLD_SPACE_MATRIX == 1 )
             Nt = Geometry::RotateVectorInverse( gWorldPrevToWorld, Nt ); // to "prev" world space
@@ -229,7 +248,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         smbNoN2x2.z = dot( n01, Nt );
         smbNoN2x2.w = dot( n11, Nt );
 
-        smbNoN = Filtering::ApplyBilinearFilter( smbNoN2x2.x, smbNoN2x2.y, smbNoN2x2.z, smbNoN2x2.w, smbBilinearFilter );
+
     }
 
     // Parallax
@@ -307,8 +326,25 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         uint4 smbInternalData = gPrev_InternalData.GatherRed( gNearestClamp, smbBilinearGatherUv ).wzxy;
     #endif
 
+    // Depth alone accepts neighboring leaf planes at grazing angles. Validate
+    // the inner taps against this surface's tangent plane before normalizing.
+    float3 normalViewPrev = Geometry::RotateVector(gWorldToViewPrev, N);
+    float4 planeTaps;
+    float4 innerViewZ = float4(smbViewZ0.w, smbViewZ1.z, smbViewZ2.y, smbViewZ3.x);
+    [unroll]
+    for (uint tap = 0; tap < 4; ++tap) {
+        float2 tapUv = (smbBilinearFilter.origin + int2(tap & 1, tap >> 1) + 0.5) / gRectSizePrev - gHistoryJitter;
+        float3 tapXv = Geometry::ReconstructViewPosition(tapUv, gFrustumPrev, UnpackViewZ(innerViewZ[tap]), gOrthoMode);
+        planeTaps[tap] = float(abs(dot(normalViewPrev, tapXv - Xvprev)) <= max(NRD_DISOCCLUSION_THRESHOLD * viewZ * NoV, NRD_EPS));
+    }
+    smbOcclusion0.z *= planeTaps.x;
+    smbOcclusion1.y *= planeTaps.y;
+    smbOcclusion2.y *= planeTaps.z;
+    smbOcclusion3.x *= planeTaps.w;
+
     // 2x2 occlusion weights
     float4 smbOcclusionWeights = Filtering::GetBilinearCustomWeights( smbBilinearFilter, float4( smbOcclusion0.z, smbOcclusion1.y, smbOcclusion2.y, smbOcclusion3.x ) );
+    smbNoN = Filtering::ApplyBilinearCustomWeights( smbNoN2x2.x, smbNoN2x2.y, smbNoN2x2.z, smbNoN2x2.w, smbOcclusionWeights );
     bool smbAllowCatRom = dot( smbOcclusion0 + smbOcclusion1 + smbOcclusion2 + smbOcclusion3, 1.0 ) > 11.5 && REBLUR_USE_CATROM_FOR_SURFACE_MOTION_IN_TA;
 
     float fbits = smbOcclusion0.z * 1.0;
@@ -346,7 +382,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     #if( NRD_SPEC )
         if( gEnableLowRoughnessSpecularStabilization != 0 && lowRoughnessSurfaceGuide && roughness <= guidedSpecularRoughnessLimit && smbFootprintQuality > 0.25 )
         {
-            float previousHitDistForTracking = gPrev_SpecHitDistForTracking.SampleLevel( gLinearClamp, smbPixelUv * gResolutionScalePrev, 0 );
+            float previousHitDistForTracking = gPrev_SpecHitDistForTracking.SampleLevel( gLinearClamp, smbSampleUv * gResolutionScalePrev, 0 );
             if( hitDistForTracking > NRD_EPS && previousHitDistForTracking > NRD_EPS )
             {
                 float motion = Math::SmoothStep( 0.5, 6.0, smbParallaxInPixelsMax );
@@ -384,10 +420,15 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     // Specular
     #if( NRD_SPEC )
         // Accumulation speed
-        float smbSpecHistoryConfidence = smbFootprintQuality;
+        // Bound the amount of history by support instead of discounting its
+        // age every frame. Keep motion/stretching and application confidence.
+        float smbSpecHistoryLimit = min(gMaxAccumulatedFrameNum,
+            max(gHistoryFixFrameNum + 1.0, gMaxAccumulatedFrameNum * pow(smbFootprintQuality / sizeQuality, 4.0)));
+        smbSpecAccumSpeed = min(smbSpecAccumSpeed, smbSpecHistoryLimit);
+        float smbSpecHistoryConfidence = sizeQuality;
         if( gHasHistoryConfidence && NRD_SUPPORTS_HISTORY_CONFIDENCE )
         {
-            float confidence = saturate( gIn_SpecConfidence.SampleLevel( gLinearClamp, smbPixelUv, 0 ) );
+            float confidence = saturate( gIn_SpecConfidence[ WithRectOrigin( pixelPos ) ] );
             smbSpecHistoryConfidence = min( smbSpecHistoryConfidence, confidence );
         }
         smbSpecAccumSpeed *= lerp( smbSpecHistoryConfidence, 1.0, 1.0 / ( 1.0 + smbSpecAccumSpeed ) );
@@ -573,7 +614,8 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         float2 vmbDelta = vmbPixelUv - smbPixelUv;
         float vmbPixelsTraveled = length( vmbDelta * gRectSize );
 
-        Filtering::Bilinear vmbBilinearFilter = Filtering::GetBilinearFilter( vmbPixelUv, gRectSizePrev );
+        float2 vmbSampleUv = vmbPixelUv + gHistoryJitter;
+        Filtering::Bilinear vmbBilinearFilter = Filtering::GetBilinearFilter( vmbSampleUv, gRectSizePrev );
         float2 vmbBilinearGatherUv = ( vmbBilinearFilter.origin + 1.0 ) * gResourceSizeInvPrev;
 
         // Virtual motion - confidence: roughness
@@ -675,10 +717,13 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             float vmbFootprintQuality = Filtering::ApplyBilinearFilter( vmbOcclusion.x, vmbOcclusion.y, vmbOcclusion.z, vmbOcclusion.w, vmbBilinearFilter );
             vmbFootprintQuality = Math::Sqrt01( vmbFootprintQuality );
 
-            float vmbSpecHistoryConfidence = vmbFootprintQuality;
+            float vmbHistoryLimit = min(gMaxAccumulatedFrameNum,
+                max(gHistoryFixFrameNum + 1.0, gMaxAccumulatedFrameNum * pow(vmbFootprintQuality, 4.0)));
+            vmbSpecAccumSpeed = min(vmbSpecAccumSpeed, vmbHistoryLimit);
+            float vmbSpecHistoryConfidence = 1.0;
             if( gHasHistoryConfidence && NRD_SUPPORTS_HISTORY_CONFIDENCE )
             {
-                float confidence = saturate( gIn_SpecConfidence.SampleLevel( gLinearClamp, vmbPixelUv, 0 ) );
+                float confidence = saturate( gIn_SpecConfidence[ WithRectOrigin( pixelPos ) ] );
                 vmbSpecHistoryConfidence = min( vmbSpecHistoryConfidence, confidence );
             }
             vmbSpecAccumSpeed *= lerp( vmbSpecHistoryConfidence, 1.0, 1.0 / ( 1.0 + vmbSpecAccumSpeed ) );
@@ -718,7 +763,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         // Tests 3, 6, 8, 11, 14, 100, 103, 104, 106, 109, 110, 114, 120, 127, 130, 131, 132, 138, 139 and 9e
         float parallaxWeight;
         {
-            float hitDistForTrackingPrev = gPrev_SpecHitDistForTracking.SampleLevel( gLinearClamp, vmbPixelUv * gResolutionScalePrev, 0 );
+            float hitDistForTrackingPrev = gPrev_SpecHitDistForTracking.SampleLevel( gLinearClamp, vmbSampleUv * gResolutionScalePrev, 0 );
             float3 XvirtualPrev = GetXvirtual( hitDistForTrackingPrev, curvature, X, Xprev, N, V, roughness );
 
             float2 vmbPixelUvPrev = Geometry::GetScreenUv( gWorldToClipPrev, XvirtualPrev );
@@ -758,7 +803,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             for( i = 1; i <= REBLUR_VIRTUAL_MOTION_PREV_PREV_WEIGHT_ITERATION_NUM; i++ )
             {
                 float2 vmbPixelUvPrev = vmbPixelUv + vmbDelta * i * stepBetweenTaps;
-                float4 vmbNormalAndRoughnessPrev = NRD_FrontEnd_UnpackNormalAndRoughness( gPrev_Normal_Roughness.SampleLevel( STOCHASTIC_BILINEAR_FILTER, StochasticBilinear( vmbPixelUvPrev, gRectSizePrev ) * gResolutionScalePrev, 0 ) );
+                float4 vmbNormalAndRoughnessPrev = NRD_FrontEnd_UnpackNormalAndRoughness( gPrev_Normal_Roughness.SampleLevel( STOCHASTIC_BILINEAR_FILTER, StochasticBilinear( vmbPixelUvPrev + gHistoryJitter, gRectSizePrev ) * gResolutionScalePrev, 0 ) );
 
                 #if( NRD_USE_PREV_WORLD_SPACE_MATRIX == 1 )
                     vmbNormalAndRoughnessPrev.xyz = Geometry::RotateVector( gWorldPrevToWorld, vmbNormalAndRoughnessPrev.xyz ); // from "prev" world space
@@ -792,7 +837,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             //a = acos( saturate( dot( V, smbVprev ) ) ); // numerically unstable
 
             float nonLinearAccumSpeed = 1.0 / ( 1.0 + smbSpecAccumSpeed );
-            float hPrev = ExtractHitDist( gHistory_Spec.SampleLevel( gLinearClamp, smbPixelUv * gResolutionScalePrev, 0 ) );
+            float hPrev = ExtractHitDist( gHistory_Spec.SampleLevel( gLinearClamp, smbSampleUv * gResolutionScalePrev, 0 ) );
             float h = lerp( hPrev, ExtractHitDist( spec ), nonLinearAccumSpeed ) * hitDistNormalization;
 
             float tana0 = ImportanceSampling::GetSpecularLobeTanHalfAngle( roughnessModified, NRD_MAX_PERCENT_OF_LOBE_VOLUME ); // base lobe angle
@@ -879,7 +924,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         REBLUR_FAST_TYPE specFastHistory;
         REBLUR_SH_TYPE specShHistory;
         {
-            float2 uv = lerp( smbPixelUv, vmbPixelUv, virtualHistoryAmount );
+            float2 uv = lerp( smbSampleUv, vmbSampleUv, virtualHistoryAmount );
             float4 occlusionWeights = lerp( smbOcclusionWeights, vmbOcclusionWeights, virtualHistoryAmount );
             bool allowCatRom = virtualHistoryAmount < 0.5 ? smbAllowCatRom : vmbAllowCatRom;
 
@@ -1049,10 +1094,15 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     // Diffuse
     #if( NRD_DIFF )
         // Accumulation speed
-        float diffHistoryConfidence = smbFootprintQuality;
+        // Bound the amount of history by support instead of discounting its
+        // age every frame. Keep motion/stretching and application confidence.
+        float diffHistoryLimit = min(gMaxAccumulatedFrameNum,
+            max(gHistoryFixFrameNum + 1.0, gMaxAccumulatedFrameNum * pow(smbFootprintQuality / sizeQuality, 4.0)));
+        diffAccumSpeed = min(diffAccumSpeed, diffHistoryLimit);
+        float diffHistoryConfidence = sizeQuality;
         if( gHasHistoryConfidence && NRD_SUPPORTS_HISTORY_CONFIDENCE )
         {
-            float confidence = saturate( gIn_DiffConfidence.SampleLevel( gLinearClamp, smbPixelUv, 0 ) );
+            float confidence = saturate( gIn_DiffConfidence[ WithRectOrigin( pixelPos ) ] );
             diffHistoryConfidence = min( diffHistoryConfidence, confidence );
         }
         diffAccumSpeed *= lerp( diffHistoryConfidence, 1.0, 1.0 / ( 1.0 + diffAccumSpeed ) );
@@ -1091,7 +1141,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         REBLUR_SH_TYPE diffShHistory;
         {
             BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights(
-                saturate( smbPixelUv ) * gRectSizePrev, gResourceSizeInvPrev,
+                saturate( smbSampleUv ) * gRectSizePrev, gResourceSizeInvPrev,
                 smbOcclusionWeights, smbAllowCatRom,
                 gHistory_Diff, diffHistory,
                 gHistory_DiffFast, diffFastHistory
@@ -1147,6 +1197,10 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             }
         #endif
 
+        // A checkerboard hole with no compatible prepass neighbors is missing
+        // data, not a black measurement. Retain validated history until sampled.
+        bool diffMissing = !diffHasData && !any(diff != 0.0) && diffAccumSpeed > 0.0;
+        diffNonLinearAccumSpeed *= float(!diffMissing);
         REBLUR_TYPE diffResult = MixHistoryAndCurrent( diffHistory, diff, diffNonLinearAccumSpeed );
         #if( NRD_MODE != OCCLUSION && NRD_MODE != DO )
             if( useDiffChromaAdmission && adjustDiffChroma )
@@ -1194,6 +1248,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             if( !diffHasData )
                 diffFastNonLinearAccumSpeed *= lerp( 1.0 - gCheckerboardResolveAccumSpeed, 1.0, diffFastNonLinearAccumSpeed );
 
+            diffFastNonLinearAccumSpeed *= float(!diffMissing);
             float diffFastResult = lerp( diffFastHistory, GetLuma( diff ), diffFastNonLinearAccumSpeed );
 
             #if( NRD_MODE != OCCLUSION && NRD_MODE != DO )

@@ -112,6 +112,11 @@ void nrd::InstanceImpl::AddSharedConstants_Relax(const RelaxSettings& settings, 
     consts->gCameraDelta = float4(m_CameraDelta, 0.0f);
     consts->gMvScale = float4(m_CommonSettings.motionVectorScale[0], m_CommonSettings.motionVectorScale[1], m_CommonSettings.motionVectorScale[2], m_CommonSettings.isMotionVectorInWorldSpace ? 1.0f : 0.0f);
     consts->gJitter = float2(m_CommonSettings.cameraJitter[0], m_CommonSettings.cameraJitter[1]);
+    // Motion vectors remain unjittered. History textures contain samples at
+    // the previous jitter, so account for it only at history lookup time.
+    consts->gHistoryJitter = float2(
+        m_CommonSettings.cameraJitter[0] / m_CommonSettings.rectSize[0] - m_CommonSettings.cameraJitterPrev[0] / m_CommonSettings.rectSizePrev[0],
+        m_CommonSettings.cameraJitter[1] / m_CommonSettings.rectSize[1] - m_CommonSettings.cameraJitterPrev[1] / m_CommonSettings.rectSizePrev[1]);
     consts->gResolutionScale = float2(float(rectW) / float(resourceW), float(rectH) / float(resourceH));
     consts->gRectOffset = float2(float(m_CommonSettings.rectOrigin[0]) / float(resourceW), float(m_CommonSettings.rectOrigin[1]) / float(resourceH));
     consts->gResourceSizeInv = float2(1.0f / resourceW, 1.0f / resourceH);

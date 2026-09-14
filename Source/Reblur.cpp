@@ -347,6 +347,11 @@ void nrd::InstanceImpl::AddSharedConstants_Reblur(const ReblurSettings& settings
     consts->gRectOffset = float2(float(m_CommonSettings.rectOrigin[0]) / float(resourceW), float(m_CommonSettings.rectOrigin[1]) / float(resourceH));
     consts->gSpecProbabilityThresholdsForMvModification = float2(m_CommonSettings.isBaseColorMetalnessAvailable ? settings.specularProbabilityThresholdsForMvModification[0] : 2.0f, m_CommonSettings.isBaseColorMetalnessAvailable ? settings.specularProbabilityThresholdsForMvModification[1] : 3.0f);
     consts->gJitter = float2(m_CommonSettings.cameraJitter[0], m_CommonSettings.cameraJitter[1]);
+    // Motion vectors remain unjittered. History textures contain samples at
+    // the previous jitter, so account for it only at history lookup time.
+    consts->gHistoryJitter = float2(
+        m_CommonSettings.cameraJitter[0] / m_CommonSettings.rectSize[0] - m_CommonSettings.cameraJitterPrev[0] / m_CommonSettings.rectSizePrev[0],
+        m_CommonSettings.cameraJitter[1] / m_CommonSettings.rectSize[1] - m_CommonSettings.cameraJitterPrev[1] / m_CommonSettings.rectSizePrev[1]);
     consts->gPrintfAt = uint2(m_CommonSettings.printfAt[0], m_CommonSettings.printfAt[1]);
     consts->gRectOrigin = uint2(m_CommonSettings.rectOrigin[0], m_CommonSettings.rectOrigin[1]);
     consts->gRectSizeMinusOne = int2(rectW - 1, rectH - 1);

@@ -28,11 +28,18 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
     groupshared float4 s_DiffNoisy_IsValid[BUFFER_Y][BUFFER_X];
 #endif
 
+groupshared float s_ViewZ[BUFFER_Y][BUFFER_X];
+groupshared float4 s_Normal_Material[BUFFER_Y][BUFFER_X];
+
 void Preload(uint2 sharedPos, int2 globalPos)
 {
     globalPos = clamp(globalPos, 0, gRectSize - 1.0);
 
-    float viewZ = gIn_ViewZ[globalPos];
+    float viewZ = UnpackViewZ(gIn_ViewZ[globalPos]);
+    s_ViewZ[sharedPos.y][sharedPos.x] = viewZ;
+    float materialID;
+    float3 normal = NRD_FrontEnd_UnpackNormalAndRoughness(gIn_Normal_Roughness[globalPos], materialID).xyz;
+    s_Normal_Material[sharedPos.y][sharedPos.x] = float4(normal, materialID);
     float isValid = float(viewZ < gDenoisingRange);
 
     #if( NRD_SPEC )
@@ -120,6 +127,19 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             w = diffuseNoisySample.w; // yes, overwrite to the same value
         #endif
 
+            // Illumination on an unrelated background must not reset or accelerate
+            // the history of a narrow foreground surface.
+            float centerViewZ = s_ViewZ[sharedMemoryIndex.y][sharedMemoryIndex.x];
+            float sampleViewZ = s_ViewZ[sharedMemoryIndexP.y][sharedMemoryIndexP.x];
+            float4 centerGuide = s_Normal_Material[sharedMemoryIndex.y][sharedMemoryIndex.x];
+            float4 sampleGuide = s_Normal_Material[sharedMemoryIndexP.y][sharedMemoryIndexP.x];
+            int2 samplePixel = clamp(int2(pixelPos) + int2(dx, dy), 0, int2(gRectSize) - 1);
+            float3 centerWorldPos = GetCurrentWorldPosFromPixelPos(pixelPos, centerViewZ);
+            float3 sampleWorldPos = GetCurrentWorldPosFromPixelPos(samplePixel, sampleViewZ);
+            float planeDistance = abs(dot(centerGuide.xyz, sampleWorldPos - centerWorldPos));
+            w *= float(planeDistance <= max(gDepthThreshold * centerViewZ, NRD_EPS));
+            w *= float(dot(centerGuide.xyz, sampleGuide.xyz) > 0.0);
+            w *= CompareMaterials(centerGuide.w, sampleGuide.w, min(gDiffMinMaterial, gSpecMinMaterial));
             if( w != 0.0 )
             {
             #if( NRD_SPEC )

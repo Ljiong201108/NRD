@@ -19,6 +19,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #include "RELAX_Common.hlsli"
 
 groupshared float4 sharedNormalSpecHitT[BUFFER_Y][BUFFER_X];
+groupshared float sharedGuideViewZ[BUFFER_Y][BUFFER_X];
 
 float isReprojectionTapValid(float3 currentWorldPos, float3 previousWorldPos, float3 currentNormal, float disocclusionThreshold)
 {
@@ -70,7 +71,7 @@ float loadSurfaceMotionBasedPrevData(
 )
 {
     // Calculating previous pixel position
-    float2 prevPixelPosFloat = prevUVSMB * gRectSizePrev;
+    float2 prevPixelPosFloat = (prevUVSMB + gHistoryJitter) * gRectSizePrev;
 
     // Calculating footprint origin and weights
     int2 bilinearOrigin = int2(floor(prevPixelPosFloat - 0.5));
@@ -129,10 +130,19 @@ float loadSurfaceMotionBasedPrevData(
     float bicubicFootprintValid = dot(tapsValid0 + tapsValid1 + tapsValid2 + tapsValid3, 1.0) > 11.5 ? 1.0 : 0.0;
     float4 bilinearTapsValid = float4(tapsValid0.z, tapsValid1.y, tapsValid2.y, tapsValid3.x);
 
-    // Using bilinear to average 4 normal samples
-    float2 uv = (float2(bilinearOrigin)+float2(1.0, 1.0)) * gResourceSizeInvPrev;
-    float3 prevNormalFlat = UnpackPrevNormalRoughness(gPrev_Normal_Roughness.SampleLevel(gLinearClamp, uv, 0)).xyz;
-    prevNormalFlat = Geometry::RotateVector(gWorldPrevToWorld, prevNormalFlat);
+    // Average only the geometry-compatible history taps. Neighboring geometry
+    // through alpha-tested holes is not part of this surface's normal guide.
+    Filtering::Bilinear normalFilter;
+    normalFilter.weights = bilinearWeights;
+    float4 normalWeights = Filtering::GetBilinearCustomWeights(normalFilter, bilinearTapsValid);
+    float3 prevNormalFlat = 0.0;
+    [unroll]
+    for (uint tap = 0; tap < 4; ++tap)
+    {
+        int2 pos = bilinearOrigin + int2(tap & 1, tap >> 1);
+        prevNormalFlat += UnpackPrevNormalRoughness(gPrev_Normal_Roughness.Load(int3(pos, 0))).xyz * normalWeights[tap];
+    }
+    prevNormalFlat = Geometry::RotateVector(gWorldPrevToWorld, _NRD_SafeNormalize(prevNormalFlat));
 
     // Reject backfacing history: if angle between current normal and previous normal is larger than 90 deg
     [flatten]
@@ -265,7 +275,8 @@ float loadVirtualMotionBasedPrevData(
     prevUVVMB = prevVirtualClipPos.xy * float2(0.5, -0.5) + float2(0.5, 0.5);
     prevUVVMB = currentMaterialID == gCameraAttachedReflectionMaterialID ? prevUVSMB : prevUVVMB;
 
-    float2 prevVirtualPixelPosFloat = prevUVVMB * gRectSizePrev;
+    float2 prevSampleUv = prevUVVMB + gHistoryJitter;
+    float2 prevVirtualPixelPosFloat = prevSampleUv * gRectSizePrev;
 
     // Calculating footprint origin and weights
     int2 bilinearOrigin = int2(floor(prevVirtualPixelPosFloat - 0.5));
@@ -341,10 +352,10 @@ float loadVirtualMotionBasedPrevData(
         #endif
 
         // Fitering previous data that does not need bicubic
-        prevReflectionHitT = gPrev_SpecHitDist.SampleLevel(gLinearClamp, prevUVVMB * gResolutionScalePrev, 0).x;
+        prevReflectionHitT = gPrev_SpecHitDist.SampleLevel(gLinearClamp, prevSampleUv * gResolutionScalePrev, 0).x;
         prevReflectionHitT = max(0.001, prevReflectionHitT);
 
-        float4 prevNormalRoughness = UnpackPrevNormalRoughness(gPrev_Normal_Roughness.SampleLevel(gLinearClamp, prevUVVMB * gResolutionScalePrev, 0));
+        float4 prevNormalRoughness = UnpackPrevNormalRoughness(gPrev_Normal_Roughness.SampleLevel(gLinearClamp, prevSampleUv * gResolutionScalePrev, 0));
         prevNormal = prevNormalRoughness.xyz;
         prevNormal = Geometry::RotateVector(gWorldPrevToWorld, prevNormal);
         prevRoughness = prevNormalRoughness.w;
@@ -359,6 +370,7 @@ float loadVirtualMotionBasedPrevData(
 void Preload(uint2 sharedPos, int2 globalPos)
 {
     globalPos = clamp(globalPos, 0, gRectSize - 1.0);
+    sharedGuideViewZ[sharedPos.y][sharedPos.x] = UnpackViewZ(gIn_ViewZ[WithRectOrigin(globalPos)]);
 
     float4 normalRoughness = NRD_FrontEnd_UnpackNormalAndRoughness(gIn_Normal_Roughness[WithRectOrigin(globalPos)]);
     float4 normalSpecHitT = normalRoughness;
@@ -441,6 +453,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float hitTM1 = sharedNormalSpecHitT[sharedMemoryIndex.y][sharedMemoryIndex.x].a;
     float minHitDist3x3 = hitTM1 == 0.0 ? NRD_INF : hitTM1;
     float3 currentNormalAveraged = currentNormal;
+    float3 reprojectionNormal = currentNormal;
 
     [unroll]
     for (i = -1; i <= 1; i++)
@@ -456,6 +469,13 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
             minHitDist3x3 = min(minHitDist3x3, normalSpecHitT.a == 0.0 ? NRD_INF : normalSpecHitT.a);
             currentNormalAveraged += normalSpecHitT.rgb;
+            int2 samplePos = clamp(int2(pixelPos) + int2(i, j), 0, int2(gRectSize) - 1);
+            float sampleViewZ = sharedGuideViewZ[sharedMemoryIndex.y + j][sharedMemoryIndex.x + i];
+            float3 sampleWorldPos = GetCurrentWorldPosFromPixelPos(samplePos, sampleViewZ);
+            float planeDistance = abs(dot(currentNormal, sampleWorldPos - currentWorldPos));
+            if (sampleViewZ < gDenoisingRange && planeDistance <= max(gDepthThreshold * currentLinearZ, NRD_EPS)
+                && dot(currentNormal, normalSpecHitT.rgb) > 0.0)
+                reprojectionNormal += normalSpecHitT.rgb;
         }
     }
     currentNormalAveraged /= 9.0;
@@ -525,7 +545,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         prevWorldPos,
         prevUVSMB,
         currentLinearZ,
-        normalize(currentNormalAveraged),
+        normalize(reprojectionNormal),
     #if( NRD_SPEC )
         specularIllumination.a,
     #endif
@@ -564,18 +584,17 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float sizeQuality = (NoVprev + 1e-3) / (NoV + 1e-3); // this order because we need to fix stretching only, shrinking is OK
     sizeQuality *= sizeQuality;
     sizeQuality *= sizeQuality;
-    footprintQuality *= lerp(0.1, 1.0, saturate(sizeQuality + abs(gOrthoMode)));
+    float stretchQuality = lerp(0.1, 1.0, saturate(sizeQuality + abs(gOrthoMode)));
+    #if( NRD_DIFF && NRD_SPEC )
+        float historyBudget = 1.0 + max(gDiffMaxAccumulatedFrameNum, gSpecMaxAccumulatedFrameNum);
+    #elif( NRD_DIFF )
+        float historyBudget = 1.0 + gDiffMaxAccumulatedFrameNum;
+    #else
+        float historyBudget = 1.0 + gSpecMaxAccumulatedFrameNum;
+    #endif
+    float supportedHistory = max(gHistoryFixFrameNum + 1.0, historyBudget * footprintQuality * footprintQuality);
+    historyLength = max(min(historyLength, supportedHistory) * sqrt(stretchQuality), 1.0);
 
-    // Minimize "getting stuck in history" effect when only fraction of bilinear footprint is valid
-    // by shortening the history length
-    [flatten]
-    if (footprintQuality < 1.0)
-    {
-        historyLength *= sqrt(footprintQuality);
-        historyLength = max(historyLength, 1.0);
-    }
-
-    // Handling history reset if needed
     historyLength = (gResetHistory != 0) ? 1.0 : historyLength;
 
     // Limiting history length: HistoryFix must be invoked if history length <= gHistoryFixFrameNum
@@ -811,8 +830,8 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     uvDiff *= Math::Rsqrt(Math::LengthSquared(uvDiff));
     uvDiff /= gRectSizePrev;
     uvDiff *= saturate(uvDiffLengthInPixels / 0.1) + uvDiffLengthInPixels / 2.0;
-    float2 backUV1 = prevUVVMB + 1.0 * uvDiff;
-    float2 backUV2 = prevUVVMB + 2.0 * uvDiff;
+    float2 backUV1 = prevUVVMB + gHistoryJitter + 1.0 * uvDiff;
+    float2 backUV2 = prevUVVMB + gHistoryJitter + 2.0 * uvDiff;
     float4 backNormalRoughness1 = UnpackPrevNormalRoughness(gPrev_Normal_Roughness.SampleLevel(gLinearClamp, backUV1 * gResolutionScalePrev, 0));
     float4 backNormalRoughness2 = UnpackPrevNormalRoughness(gPrev_Normal_Roughness.SampleLevel(gLinearClamp, backUV2 * gResolutionScalePrev, 0));
     backNormalRoughness1.rgb = Geometry::RotateVector(gWorldPrevToWorld, backNormalRoughness1.rgb);

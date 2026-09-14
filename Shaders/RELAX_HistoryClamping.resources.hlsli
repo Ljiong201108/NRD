@@ -51,6 +51,19 @@ NRD_INPUTS_START
             NRD_INPUT( Texture2D, float4, gIn_SpecShFast, t, 7 )
         #endif
     #endif
+#if( NRD_DIFF && NRD_SPEC )
+    #if( NRD_MODE == SH )
+        NRD_INPUT( Texture2D, float4, gIn_Normal_Roughness, t, 13 )
+    #else
+        NRD_INPUT( Texture2D, float4, gIn_Normal_Roughness, t, 9 )
+    #endif
+#else
+    #if( NRD_MODE == SH )
+        NRD_INPUT( Texture2D, float4, gIn_Normal_Roughness, t, 8 )
+    #else
+        NRD_INPUT( Texture2D, float4, gIn_Normal_Roughness, t, 6 )
+    #endif
+#endif
 NRD_INPUTS_END
 
 NRD_OUTPUTS_START

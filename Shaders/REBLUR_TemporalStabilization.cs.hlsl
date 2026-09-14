@@ -103,7 +103,8 @@ void Preload(uint2 sharedPos, int2 globalPos) {
     float2 data2 = UnpackData2(gIn_Data2[pixelPos], bits, smbAllowCatRom);
 
     // Surface motion footprint
-    Filtering::Bilinear smbBilinearFilter = Filtering::GetBilinearFilter(smbPixelUv, gRectSizePrev);
+    float2 smbSampleUv = smbPixelUv + gHistoryJitter;
+    Filtering::Bilinear smbBilinearFilter = Filtering::GetBilinearFilter(smbSampleUv, gRectSizePrev);
     float4 smbOcclusion = float4((bits & uint4(1, 2, 4, 8)) != 0);
 
     float4 smbOcclusionWeights = Filtering::GetBilinearCustomWeights(smbBilinearFilter, smbOcclusion);
@@ -191,7 +192,7 @@ void Preload(uint2 sharedPos, int2 globalPos) {
     float2 smbDiffHistoryState;
 
     BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights2(
-        saturate(smbPixelUv) * gRectSizePrev, gResourceSizeInvPrev,
+        saturate(smbSampleUv) * gRectSizePrev, gResourceSizeInvPrev,
         smbOcclusionWeights, smbAllowCatRom,
         gHistory_DiffLumaStabilized, smbDiffHistoryState);
 
@@ -204,7 +205,8 @@ void Preload(uint2 sharedPos, int2 globalPos) {
     float diffLumaRiseReference = smbDiffLumaHistory;
 
     // Compute antilag
-    float diffAntilag = ComputeAntilag(smbDiffLumaHistory, diffLumaM1, diffLumaSigma, smbFootprintQuality * data1.x);
+    // A different surface's illumination is not evidence of a lighting change.
+    float diffAntilag = ComputeAntilag(smbDiffLumaHistory, diffGuideLumaM1, diffGuideLumaSigma, smbFootprintQuality * data1.x);
     float coherentLightingChange = 0.0;
     if (materialID < 0.5 && diffSpatialReliability > 0.0) {
         float coherentRise = max(
@@ -226,7 +228,11 @@ void Preload(uint2 sharedPos, int2 globalPos) {
     diffHistoryWeight *= float(pixelUv.x >= gSplitScreen);
     diffHistoryWeight *= float(smbPixelUv.x >= gSplitScreenPrev);
 
-    smbDiffLumaHistory = Color::Clamp(diffLumaM1, diffLumaSigma * diffTemporalAccumulationParams.y, smbDiffLumaHistory);
+    // Include this surface's current estimate when neighboring surfaces
+    // dominate the variance window (thin silhouettes and isolated pixels).
+    float diffClampSigma = diffLumaSigma * diffTemporalAccumulationParams.y;
+    smbDiffLumaHistory = clamp(smbDiffLumaHistory, min(diffLumaM1 - diffClampSigma, diffLuma),
+        max(diffLumaM1 + diffClampSigma, diffLuma));
 
     float diffLumaStabilized = lerp(diffLuma, smbDiffLumaHistory, min(diffHistoryWeight, gStabilizationStrength));
 
@@ -311,7 +317,7 @@ void Preload(uint2 sharedPos, int2 globalPos) {
                     continue;
 
                 float2 historyPixel = clamp(
-                    smbPixelUv * gRectSizePrev + float2(offset),
+                    smbSampleUv * gRectSizePrev + float2(offset),
                     0.5, gRectSizePrev - 0.5);
                 float historyLuma = gHistory_DiffLumaStabilized.SampleLevel(
                                                                    gLinearClamp, historyPixel * gResourceSizeInvPrev, 0)
@@ -548,12 +554,13 @@ void Preload(uint2 sharedPos, int2 globalPos) {
     float smbSpecLumaHistory;
 
     BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights1(
-        saturate(smbPixelUv) * gRectSizePrev, gResourceSizeInvPrev,
+        saturate(smbSampleUv) * gRectSizePrev, gResourceSizeInvPrev,
         smbOcclusionWeights, smbAllowCatRom,
         gHistory_SpecLumaStabilized, smbSpecLumaHistory);
 
     // Virtual motion footprint
-    Filtering::Bilinear vmbBilinearFilter = Filtering::GetBilinearFilter(vmbPixelUv, gRectSizePrev);
+    float2 vmbSampleUv = vmbPixelUv + gHistoryJitter;
+    Filtering::Bilinear vmbBilinearFilter = Filtering::GetBilinearFilter(vmbSampleUv, gRectSizePrev);
     float4 vmbOcclusion = float4((bits & uint4(16, 32, 64, 128)) != 0);
     float4 vmbOcclusionWeights = Filtering::GetBilinearCustomWeights(vmbBilinearFilter, vmbOcclusion);
     bool vmbAllowCatRom = dot(vmbOcclusion, 1.0) > 3.5 && REBLUR_USE_CATROM_FOR_VIRTUAL_MOTION_IN_TS;
@@ -565,7 +572,7 @@ void Preload(uint2 sharedPos, int2 globalPos) {
     float vmbSpecLumaHistory;
 
     BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights1(
-        saturate(vmbPixelUv) * gRectSizePrev, gResourceSizeInvPrev,
+        saturate(vmbSampleUv) * gRectSizePrev, gResourceSizeInvPrev,
         vmbOcclusionWeights, vmbAllowCatRom,
         gHistory_SpecLumaStabilized, vmbSpecLumaHistory);
 
@@ -579,7 +586,7 @@ void Preload(uint2 sharedPos, int2 globalPos) {
     float footprintQuality = lerp(smbFootprintQuality, vmbFootprintQuality, virtualHistoryAmount);
 
     // Compute antilag
-    float specAntilag = ComputeAntilag(specLumaHistory, specLumaM1, specLumaSigma, footprintQuality * data1.y);
+    float specAntilag = ComputeAntilag(specLumaHistory, specGuideLumaM1, specGuideLumaSigma, footprintQuality * data1.y);
 
     // Clamp history and combine with the current frame
     float2 specTemporalAccumulationParams = GetTemporalAccumulationParams(footprintQuality, data1.y);
@@ -601,7 +608,11 @@ void Preload(uint2 sharedPos, int2 globalPos) {
 
     specHistoryWeight *= acceleration;
 
-    specLumaHistory = Color::Clamp(specLumaM1, specLumaSigma * specTemporalAccumulationParams.y, specLumaHistory);
+    // Include this surface's current estimate when neighboring surfaces
+    // dominate the variance window (thin silhouettes and isolated pixels).
+    float specClampSigma = specLumaSigma * specTemporalAccumulationParams.y;
+    specLumaHistory = clamp(specLumaHistory, min(specLumaM1 - specClampSigma, specLuma),
+        max(specLumaM1 + specClampSigma, specLuma));
 
     float specLumaStabilized = lerp(specLuma, specLumaHistory, min(specHistoryWeight, gStabilizationStrength));
 

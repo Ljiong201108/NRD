@@ -28,13 +28,16 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 groupshared float s_MaterialID[BUFFER_Y][BUFFER_X];
 
+groupshared float4 s_Normal_ViewZ[BUFFER_Y][BUFFER_X];
+
 // Helper functions
 void Preload(uint2 sharedPos, int2 globalPos)
 {
     globalPos = clamp(globalPos, 0, gRectSize - 1.0);
 
     float materialID;
-    NRD_FrontEnd_UnpackNormalAndRoughness(gIn_Normal_Roughness[globalPos], materialID);
+    float3 normal = NRD_FrontEnd_UnpackNormalAndRoughness(gIn_Normal_Roughness[globalPos], materialID).xyz;
+    s_Normal_ViewZ[sharedPos.y][sharedPos.x] = float4(normal, UnpackViewZ(gIn_ViewZ[globalPos]));
     s_MaterialID[sharedPos.y][sharedPos.x] = materialID;
 
 #if( NRD_SPEC )
@@ -70,6 +73,7 @@ void runRCRS(
 
     float maxSpecularLuminance = -1.0;
     float minSpecularLuminance = 1.0e6;
+    float specularSupport = 0.0;
     int2 maxSpecularLuminanceCoords = sharedMemoryIndex;
     int2 minSpecularLuminanceCoords = sharedMemoryIndex;
 #endif
@@ -82,6 +86,7 @@ void runRCRS(
 
     float maxDiffuseLuminance = -1.0;
     float minDiffuseLuminance = 1.0e6;
+    float diffuseSupport = 0.0;
     int2 maxDiffuseLuminanceCoords = sharedMemoryIndex;
     int2 minDiffuseLuminanceCoords = sharedMemoryIndex;
 #endif
@@ -113,10 +118,22 @@ void runRCRS(
 #endif
 
             float sampleMaterialID = s_MaterialID[sharedMemoryIndexSample.y][sharedMemoryIndexSample.x];
+            // Rank only samples from this surface. Otherwise an isolated dark
+            // face is replaced by its bright background on every frame.
+            float4 centerGuide = s_Normal_ViewZ[sharedMemoryIndex.y][sharedMemoryIndex.x];
+            float4 sampleGuide = s_Normal_ViewZ[sharedMemoryIndexSample.y][sharedMemoryIndexSample.x];
+            int2 samplePixel = clamp(pixelPos + int2(xx, yy), 0, int2(gRectSize) - 1);
+            float3 centerWorldPos = GetCurrentWorldPosFromPixelPos(pixelPos, centerGuide.w);
+            float3 sampleWorldPos = GetCurrentWorldPosFromPixelPos(samplePixel, sampleGuide.w);
+            float planeDistance = abs(dot(centerGuide.xyz, sampleWorldPos - centerWorldPos));
+            if (sampleGuide.w >= gDenoisingRange || planeDistance > max(gDepthThreshold * centerGuide.w, NRD_EPS)
+                || dot(centerGuide.xyz, sampleGuide.xyz) <= 0.0)
+                continue;
 
 #if( NRD_SPEC )
             if (CompareMaterials(sampleMaterialID, centerMaterialID, gSpecMinMaterial))
             {
+                specularSupport += 1.0;
                 if (specularLuminanceSample > maxSpecularLuminance)
                 {
                     maxSpecularLuminance = specularLuminanceSample;
@@ -133,6 +150,7 @@ void runRCRS(
 #if( NRD_DIFF )
             if (CompareMaterials(sampleMaterialID, centerMaterialID, gDiffMinMaterial))
             {
+                diffuseSupport += 1.0;
                 if (diffuseLuminanceSample > maxDiffuseLuminance)
                 {
                     maxDiffuseLuminance = diffuseLuminanceSample;
@@ -156,7 +174,10 @@ void runRCRS(
         specularCoords = maxSpecularLuminanceCoords;
     if(specularLuminanceCenter < minSpecularLuminance)
         specularCoords = minSpecularLuminanceCoords;
-    outSpecular = float4(s_Spec[specularCoords.y][specularCoords.x].rgb, specular2ndMomentCenter);
+    // One surviving neighbor is weak evidence of a firefly. Blend the
+    // correction by support instead of replacing the center with that sample.
+    outSpecular = float4(lerp(specularIlluminationCenter,
+        s_Spec[specularCoords.y][specularCoords.x].rgb, saturate(specularSupport / 3.0)), specular2ndMomentCenter);
 #endif
 
 #if( NRD_DIFF )
@@ -165,7 +186,10 @@ void runRCRS(
         diffuseCoords = maxDiffuseLuminanceCoords;
     if(diffuseLuminanceCenter < minDiffuseLuminance)
         diffuseCoords = minDiffuseLuminanceCoords;
-    outDiffuse = float4(s_Diff[diffuseCoords.y][diffuseCoords.x].rgb, diffuse2ndMomentCenter);
+    // One surviving neighbor is weak evidence of a firefly. Blend the
+    // correction by support instead of replacing the center with that sample.
+    outDiffuse = float4(lerp(diffuseIlluminationCenter,
+        s_Diff[diffuseCoords.y][diffuseCoords.x].rgb, saturate(diffuseSupport / 3.0)), diffuse2ndMomentCenter);
 #endif
 }
 

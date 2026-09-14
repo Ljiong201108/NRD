@@ -168,6 +168,8 @@ void nrd::InstanceImpl::Add_RelaxSpecular(DenoiserData& denoiserData) {
         PushInput(AsUint(Transient::SPEC_ILLUM_PING));
         PushInput(AsUint(Transient::SPEC_ILLUM_PONG));
 
+        PushInput(AsUint(ResourceType::IN_NORMAL_ROUGHNESS));
+
         // Outputs
         PushOutput(AsUint(Permanent::HISTORY_LENGTH_PREV));
         PushOutput(AsUint(Permanent::SPEC_ILLUM_PREV));
