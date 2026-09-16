@@ -275,6 +275,10 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     // - IMPORTANT: a static pixel ( with relaxed threshold ) can touch a moving pixel, leading to reprojection artefacts
     float smallParallax = Math::LinearStep( 0.25, 0.0, smbParallaxInPixelsMax );
     float cosMaxAngle = REBLUR_ALMOST_ZERO_ANGLE - 0.25 * smallParallax;
+    #if( NRD_DIFF && !NRD_SPEC && ( NRD_MODE == RADIANCE || NRD_MODE == SH ) )
+        if( gEnableHalfRateTransmission != 0 && materialID > 0.5 && materialID < 1.5 && roughness < 0.12 )
+            cosMaxAngle = min( cosMaxAngle, 0.9 );
+    #endif
 
     float3 V = GetViewVector( X );
     float NoV = abs( dot( N, V ) );

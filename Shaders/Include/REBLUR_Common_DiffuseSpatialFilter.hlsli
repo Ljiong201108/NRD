@@ -66,7 +66,8 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 #if (REBLUR_SPATIAL_MODE != REBLUR_PRE_BLUR)
         bool opaqueDiffuseStabilization = materialID < 0.5;
-        if (gEnableLowRoughnessSpecularStabilization != 0 && opaqueDiffuseStabilization)
+        bool finiteTransmissionDiffuse = gEnableHalfRateTransmission != 0 && materialID > 0.5 && materialID < 1.5 && roughness < 0.12;
+        if (gEnableLowRoughnessSpecularStabilization != 0 && (opaqueDiffuseStabilization || finiteTransmissionDiffuse))
             blurRadius = max(blurRadius, 2.0);
 #endif
 
@@ -83,7 +84,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #endif
 
 #if (REBLUR_SPATIAL_MODE != REBLUR_PRE_BLUR)
-        if (gEnableLowRoughnessSpecularStabilization != 0 && opaqueDiffuseStabilization)
+        if (gEnableLowRoughnessSpecularStabilization != 0 && (opaqueDiffuseStabilization || finiteTransmissionDiffuse))
             minHitDistWeight = max(minHitDistWeight,
                 lerp(0.12, 0.25, Math::SmoothStep(4.0, 12.0, data1.x)));
 #endif
