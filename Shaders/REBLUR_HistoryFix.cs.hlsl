@@ -126,8 +126,9 @@ float GetSurfaceWeight(int2 sharedPos, int2 pixelPos, float3 Xv, float3 Nv, floa
         hitDist = ExtractHitDist(diff);
 
         // Stride between taps
+        bool smoothOpaqueDiffuse = gEnableHalfRateTransmission != 0 && materialID < 0.5 && roughness <= 0.12;
         float diffStride = stride.x;
-        diffStride *= lerp(0.25 + 0.75 * Math::Sqrt01(hitDistFactor), 1.0, diffNonLinearAccumSpeed); // "hitDistFactor" is very noisy and breaks nice patterns
+        if (!smoothOpaqueDiffuse) diffStride *= lerp(0.25 + 0.75 * Math::Sqrt01(hitDistFactor), 1.0, diffNonLinearAccumSpeed); // "hitDistFactor" is very noisy and breaks nice patterns
         diffStride = round(diffStride);
         bool smoothTransmission = gEnableHalfRateTransmission != 0 && materialID > 0.5 && roughness < 0.12;
         if (smoothTransmission)
@@ -197,7 +198,7 @@ float GetSurfaceWeight(int2 sharedPos, int2 pixelPos, float3 Xv, float3 Nv, floa
                     // A-trous weight
                     float hs = ExtractHitDist(s);
                     float d = hs - hitDist; // use normalized hit distanced for simplicity ( no difference )
-                    w *= exp(-d * d * hitDistWeightNorm);
+                    if (!smoothOpaqueDiffuse) w *= exp(-d * d * hitDistWeightNorm);
 
                     // Accumulate
                     sumd += w;

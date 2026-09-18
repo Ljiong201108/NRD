@@ -326,6 +326,8 @@ file(GLOB_RECURSE SHADERS
 )
 
 set_source_files_properties(${SHADERS} PROPERTIES VS_TOOL_OVERRIDE "None")
+set_property(SOURCE Source/Reblur.cpp Source/Relax.cpp Source/Sigma.cpp Source/Reference.cpp
+    APPEND PROPERTY OBJECT_DEPENDS "${SHADERS};${CMAKE_CURRENT_SOURCE_DIR}/Shaders/Shaders.cfg")
 
 # ShaderMake general arguments
 get_target_property(ML_SOURCE_DIR MathLib SOURCE_DIR)
