@@ -305,7 +305,11 @@ float GetSurfaceWeight(int2 sharedPos, int2 pixelPos, float3 Xv, float3 Nv, floa
         float diffMax = max(diffM1 + diffSigma, diffCenter);
 
         float diffLumaClamped = clamp(diffLuma, diffMin, diffMax);
-        diffLuma = lerp(diffLumaClamped, diffLuma, 1.0 / (1.0 + float(gMaxFastAccumulatedFrameNum < gMaxAccumulatedFrameNum) * frameNum.x * 2.0));
+        float diffClampingRelaxation = 1.0 / (1.0 + float(gMaxFastAccumulatedFrameNum < gMaxAccumulatedFrameNum) * frameNum.x * 2.0);
+        if (gEnableHalfRateTransmission != 0 && materialID < 0.5 && roughness <= 0.12)
+            diffClampingRelaxation = max(diffClampingRelaxation,
+                saturate((frameNum.x - gMaxFastAccumulatedFrameNum) / max(gMaxAccumulatedFrameNum - gMaxFastAccumulatedFrameNum, 1.0)));
+        diffLuma = lerp(diffLumaClamped, diffLuma, diffClampingRelaxation);
 
 // Change luma
 #    if (REBLUR_SHOW == REBLUR_SHOW_FAST_HISTORY)
