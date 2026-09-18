@@ -19,7 +19,7 @@ NRD_SAMPLERS_END
 
 NRD_INPUTS_START
     NRD_INPUT( Texture2D, float, gIn_Tiles, t, 0 )
-    NRD_INPUT( Texture2D, float3, gIn_Mv, t, 1 )
+    NRD_INPUT( Texture2D, float4, gIn_Mv, t, 1 )
     NRD_INPUT( Texture2D, float4, gIn_Normal_Roughness, t, 2 )
     NRD_INPUT( Texture2D, float, gIn_ViewZ, t, 3 )
     NRD_INPUT( Texture2D, float, gIn_DisocclusionThresholdMix, t, 4 )

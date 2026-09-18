@@ -365,6 +365,19 @@ float loadVirtualMotionBasedPrevData(
 }
 #endif
 
+#if( NRD_DIFF )
+groupshared uint2 sharedDirectDiffuse[BUFFER_Y][BUFFER_X];
+#endif
+#if( NRD_SPEC )
+groupshared uint2 sharedDirectSpecular[BUFFER_Y][BUFFER_X];
+#endif
+uint2 PackDirectSample(float4 value) {
+    uint4 packed = f32tof16(value);
+    return packed.xy | (packed.zw << 16);
+}
+float4 UnpackDirectSample(uint2 value) {
+    return f16tof32(uint4(value & 65535u, value >> 16));
+}
 void Preload(uint2 sharedPos, int2 globalPos)
 {
     globalPos = clamp(globalPos, 0, gRectSize - 1.0);
@@ -376,9 +389,14 @@ void Preload(uint2 sharedPos, int2 globalPos)
 #if( NRD_SPEC )
     float4 inSpecularIllumination = gIn_Spec[globalPos];
     normalSpecHitT.a = inSpecularIllumination.a;
+    sharedDirectSpecular[sharedPos.y][sharedPos.x] = PackDirectSample(float4(inSpecularIllumination.rgb, float(inSpecularIllumination.a > 0)));
 #endif
 
     sharedNormalSpecHitT[sharedPos.y][sharedPos.x] = normalSpecHitT;
+#if( NRD_DIFF )
+    float4 diffuseSample = gIn_Diff[globalPos];
+    sharedDirectDiffuse[sharedPos.y][sharedPos.x] = PackDirectSample(float4(diffuseSample.rgb, float(diffuseSample.w > 0)));
+#endif
 }
 
 // Main
@@ -415,7 +433,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
     // Getting previous position
     float2 pixelUv = float2(pixelPos + 0.5) * gRectSizeInv;
-    float3 mv = gIn_Mv[WithRectOrigin(pixelPos)] * gMvScale.xyz;
+    float3 mv = gIn_Mv[WithRectOrigin(pixelPos)].xyz * gMvScale.xyz;
     float3 prevWorldPos = currentWorldPos;
     float2 prevUVSMB = pixelUv + mv.xy;
 
@@ -636,6 +654,33 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         diffuseAlphaResponsive *= 1.0 - gCheckerboardResolveAccumSpeed;
     }
 
+    if (gIn_Mv[WithRectOrigin(pixelPos)].w < -0.5) {
+        float3 mean = 0, second = 0;
+        float count = 0;
+        [unroll] for (int y = -1; y <= 1; ++y)
+            [unroll] for (int x = -1; x <= 1; ++x) {
+                int2 q = sharedMemoryIndex + int2(x, y);
+                float4 sampleValue = UnpackDirectSample(sharedDirectDiffuse[q.y][q.x]);
+                float sampleDepth = sharedGuideViewZ[q.y][q.x];
+                float3 sampleNormal = sharedNormalSpecHitT[q.y][q.x].rgb;
+                float weight = sampleValue.w * float(abs(sampleDepth - currentLinearZ) <= max(.03, .02 * currentLinearZ) && dot(sampleNormal, currentNormal) > .95);
+                mean += sampleValue.rgb * weight;
+                second += sampleValue.rgb * sampleValue.rgb * weight;
+                count += weight;
+            }
+        if (count >= 3) {
+            mean /= count;
+            float3 sigma = sqrt(max(second / count - mean * mean, 0));
+            float3 lower = max(mean - .75 * sigma, 0);
+            float3 upper = mean + .75 * sigma;
+            float previousLuma = Color::Luminance(prevDiffuseIlluminationAnd2ndMomentSMB.rgb);
+            prevDiffuseIlluminationAnd2ndMomentSMB.rgb = clamp(prevDiffuseIlluminationAnd2ndMomentSMB.rgb, lower, upper);
+            float clippedLuma = Color::Luminance(prevDiffuseIlluminationAnd2ndMomentSMB.rgb);
+            float momentScale = clippedLuma / max(previousLuma, 1e-6);
+            prevDiffuseIlluminationAnd2ndMomentSMB.a *= momentScale * momentScale;
+            prevDiffuseIlluminationAnd2ndMomentSMBResponsive = clamp(prevDiffuseIlluminationAnd2ndMomentSMBResponsive, lower, upper);
+        }
+    }
     float4 accumulatedDiffuseIlluminationAnd2ndMoment = lerp(prevDiffuseIlluminationAnd2ndMomentSMB, float4(diffuseIllumination.rgb, diffuse2ndMoment), diffuseAlpha);
     float3 accumulatedDiffuseIlluminationResponsive = lerp(prevDiffuseIlluminationAnd2ndMomentSMBResponsive.rgb, diffuseIllumination.rgb, diffuseAlphaResponsive);
 
@@ -893,6 +938,37 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         specSMBResponsiveAlpha *= 1.0 - gCheckerboardResolveAccumSpeed * (SMBReprojectionFound > 0 ? 1.0 : 0.0);
     }
 
+    if (gIn_Mv[WithRectOrigin(pixelPos)].w < -0.5) {
+        float3 mean = 0, second = 0;
+        float count = 0;
+        [unroll] for (int y = -1; y <= 1; ++y)
+            [unroll] for (int x = -1; x <= 1; ++x) {
+                int2 q = sharedMemoryIndex + int2(x, y);
+                float4 sampleValue = UnpackDirectSample(sharedDirectSpecular[q.y][q.x]);
+                float sampleDepth = sharedGuideViewZ[q.y][q.x];
+                float3 sampleNormal = sharedNormalSpecHitT[q.y][q.x].rgb;
+                float weight = sampleValue.w * float(abs(sampleDepth - currentLinearZ) <= max(.03, .02 * currentLinearZ) && dot(sampleNormal, currentNormal) > .95);
+                mean += sampleValue.rgb * weight;
+                second += sampleValue.rgb * sampleValue.rgb * weight;
+                count += weight;
+            }
+        if (count >= 3) {
+            mean /= count;
+            float3 sigma = sqrt(max(second / count - mean * mean, 0));
+            float3 lower = max(mean - .75 * sigma, 0);
+            float3 upper = mean + .75 * sigma;
+            float previousLuma = Color::Luminance(prevSpecularIlluminationAnd2ndMomentSMB.rgb);
+            prevSpecularIlluminationAnd2ndMomentSMB.rgb = clamp(prevSpecularIlluminationAnd2ndMomentSMB.rgb, lower, upper);
+            float momentScale = Color::Luminance(prevSpecularIlluminationAnd2ndMomentSMB.rgb) / max(previousLuma, 1e-6);
+            prevSpecularIlluminationAnd2ndMomentSMB.a *= momentScale * momentScale;
+            prevSpecularIlluminationAnd2ndMomentSMBResponsive = clamp(prevSpecularIlluminationAnd2ndMomentSMBResponsive, lower, upper);
+            previousLuma = Color::Luminance(prevSpecularIlluminationAnd2ndMomentVMB.rgb);
+            prevSpecularIlluminationAnd2ndMomentVMB.rgb = clamp(prevSpecularIlluminationAnd2ndMomentVMB.rgb, lower, upper);
+            momentScale = Color::Luminance(prevSpecularIlluminationAnd2ndMomentVMB.rgb) / max(previousLuma, 1e-6);
+            prevSpecularIlluminationAnd2ndMomentVMB.a *= momentScale * momentScale;
+            prevSpecularIlluminationAnd2ndMomentVMBResponsive.rgb = clamp(prevSpecularIlluminationAnd2ndMomentVMBResponsive.rgb, lower, upper);
+        }
+    }
     float4 accumulatedSpecularSMB;
     accumulatedSpecularSMB.rgb = lerp(prevSpecularIlluminationAnd2ndMomentSMB.rgb, specularIllumination.rgb, specSMBAlpha);
     accumulatedSpecularSMB.w = lerp(prevReflectionHitTSMB, specularIllumination.w, max(specSMBAlpha, 0.1));

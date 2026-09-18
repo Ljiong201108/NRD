@@ -42,6 +42,10 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
         float hitDist = ExtractHitDist(diff) * hitDistScale;
         float hitDistFactor = GetHitDistFactor(hitDist, frustumSize);
 
+        bool smoothOpaqueDiffuse = gEnableHalfRateTransmission != 0 && materialID < 0.5 && roughness <= 0.12;
+        float4 diffuseRotator = smoothOpaqueDiffuse ? float4(1.0, 0.0, 0.0, 1.0) : rotator;
+        if (smoothOpaqueDiffuse) hitDistFactor = 1.0;
+
         // Blur radius
 #if (REBLUR_SPATIAL_MODE == REBLUR_PRE_BLUR)
         float blurRadius = gDiffPrepassBlurRadius;
@@ -99,7 +103,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #    endif
         skew *= gRectSizeInv * blurRadius;
 
-        float4 scaledRotator = Geometry::ScaleRotator(rotator, skew);
+        float4 scaledRotator = Geometry::ScaleRotator(diffuseRotator, skew);
 #else
     // World-space settings
     float2x3 TvBv = GetKernelBasis(Nv, Nv); // D = N
@@ -117,7 +121,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #if (REBLUR_SPATIAL_MODE == REBLUR_PRE_BLUR || REBLUR_USE_SCREEN_SPACE_SAMPLING_FOR_DIFFUSE == 1)
             float2 uv = pixelUv + Geometry::RotateVector(scaledRotator, offset.xy);
 #else
-        float2 uv = GetKernelSampleCoordinates(gViewToClip, offset, Xv, TvBv[0], TvBv[1], rotator);
+        float2 uv = GetKernelSampleCoordinates(gViewToClip, offset, Xv, TvBv[0], TvBv[1], diffuseRotator);
 #endif
 
             // Apply "mirror" to not waste taps going outside of the screen
@@ -167,7 +171,8 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
             REBLUR_TYPE s = gIn_Diff[int2(checkerboardX, pos.y)];
             s = Denanify(w, s);
 
-            w *= lerp(minHitDistWeight, 1.0, ComputeExponentialWeight(ExtractHitDist(s), hitDistanceWeightParams.x, hitDistanceWeightParams.y));
+            if (!smoothOpaqueDiffuse)
+                w *= lerp(minHitDistWeight, 1.0, ComputeExponentialWeight(ExtractHitDist(s), hitDistanceWeightParams.x, hitDistanceWeightParams.y));
 
             // Accumulate
             sum += w;
