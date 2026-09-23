@@ -166,7 +166,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
             w *= ComputeWeight(NoX, geometryWeightParams.x, geometryWeightParams.y);
             w *= CompareMaterials(materialID, materialIDs, gDiffMinMaterial);
             w *= ComputeWeight(angle, normalWeightParam, 0.0);
-            w = zs < gDenoisingRange ? w : 0.0; // |NoX| can be ~0 if "zs" is out of range
+            w = zs < gDenoisingRange && dot(N, Ns.xyz) >= 0.5 ? w : 0.0; // |NoX| can be ~0 if "zs" is out of range
 
             REBLUR_TYPE s = gIn_Diff[int2(checkerboardX, pos.y)];
             s = Denanify(w, s);
@@ -197,8 +197,8 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #    if (NRD_SUPPORTS_CHECKERBOARD == 1)
     // Checkerboard resolve ( if pre-pass failed )
     [branch] if (sum == 0.0) {
-        REBLUR_TYPE s0 = gIn_Diff[checkerboardPos.xz];
-        REBLUR_TYPE s1 = gIn_Diff[checkerboardPos.yz];
+        REBLUR_TYPE s0 = gIn_Diff[checkerboardPos0];
+        REBLUR_TYPE s1 = gIn_Diff[checkerboardPos1];
 
         s0 = Denanify(wc.x, s0);
         s1 = Denanify(wc.y, s1);
@@ -206,8 +206,8 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
         diff = s0 * wc.x + s1 * wc.y;
 
 #        if (NRD_MODE == SH)
-        float4 sh0 = gIn_DiffSh[checkerboardPos.xz];
-        float4 sh1 = gIn_DiffSh[checkerboardPos.yz];
+        float4 sh0 = gIn_DiffSh[checkerboardPos0];
+        float4 sh1 = gIn_DiffSh[checkerboardPos1];
 
         sh0 = Denanify(wc.x, sh0);
         sh1 = Denanify(wc.y, sh1);

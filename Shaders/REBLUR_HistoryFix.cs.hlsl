@@ -51,7 +51,7 @@ float GetSurfaceWeight(int2 sharedPos, int2 pixelPos, float3 Xv, float3 Nv, floa
     pixelPos = clamp(pixelPos, 0, gRectSizeMinusOne);
     float3 sampleXv = Geometry::ReconstructViewPosition((pixelPos + 0.5) * gRectSizeInv, gFrustum, sampleViewZ, gOrthoMode);
     return float(sampleViewZ < gDenoisingRange && abs(dot(Nv, sampleXv - Xv)) <= max(NRD_DISOCCLUSION_THRESHOLD * abs(Xv.z), NRD_EPS)
-        && dot(N, guide.xyz) > 0.0) * CompareMaterials(materialID, guide.w, minMaterial);
+        && dot(N, guide.xyz) >= 0.5) * CompareMaterials(materialID, guide.w, minMaterial);
 }
 
 [numthreads(GROUP_X, GROUP_Y, 1)] NRD_EXPORT void NRD_CS_MAIN(NRD_CS_MAIN_ARGS) {
@@ -185,7 +185,7 @@ float GetSurfaceWeight(int2 sharedPos, int2 pixelPos, float3 Xv, float3 Nv, floa
                     float w = ComputeWeight(NoX, geometryWeightParams.x, geometryWeightParams.y);
                     w *= CompareMaterials(materialID, materialIDs, gDiffMinMaterial);
                     w *= ComputeExponentialWeight(angle, normalWeightParam, 0.0);
-                    w = zs < gDenoisingRange ? w : 0.0; // |NoX| can be ~0 if "zs" is out of range
+                    w = zs < gDenoisingRange && dot(N, Ns.xyz) >= 0.5 ? w : 0.0; // |NoX| can be ~0 if "zs" is out of range
                                                         // gaussian weight is not needed
 
 #    if (REBLUR_PERFORMANCE_MODE == 0)
@@ -423,7 +423,7 @@ float GetSurfaceWeight(int2 sharedPos, int2 pixelPos, float3 Xv, float3 Nv, floa
                     w *= CompareMaterials(materialID, materialIDs, gSpecMinMaterial);
                     w *= ComputeExponentialWeight(angle, normalWeightParam, 0.0);
                     w *= ComputeExponentialWeight(Ns.w * Ns.w, relaxedRoughnessWeightParams.x, relaxedRoughnessWeightParams.y);
-                    w = zs < gDenoisingRange ? w : 0.0; // |NoX| can be ~0 if "zs" is out of range
+                    w = zs < gDenoisingRange && dot(N, Ns.xyz) >= 0.5 ? w : 0.0; // |NoX| can be ~0 if "zs" is out of range
                                                         // gaussian weight is not needed
 
 #    if (REBLUR_PERFORMANCE_MODE == 0)

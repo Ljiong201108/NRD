@@ -30,12 +30,6 @@ float isReprojectionTapValid(float3 currentWorldPos, float3 previousWorldPos, fl
     return maxPlaneDistance > disocclusionThreshold ? 0.0 : 1.0;
 }
 
-// Returns reprojected data from previous frame calculated using filtering based on filters above.
-// Returns reprojection search result based on surface motion:
-// 2 - reprojection found, bicubic footprint was used
-// 1 - reprojection found, bilinear footprint was used
-// 0 - reprojection not found
-
 float loadSurfaceMotionBasedPrevData(
     float3 prevWorldPos,
     float2 prevUVSMB,
@@ -77,30 +71,9 @@ float loadSurfaceMotionBasedPrevData(
     int2 bilinearOrigin = int2(floor(prevPixelPosFloat - 0.5));
     float2 bilinearWeights = frac(prevPixelPosFloat - 0.5);
 
-    // Checking bicubic footprint (with cut corners)
-    // remembering bilinear taps validity and worldspace position along the way,
-    // for faster weighted bilinear and for calculating previous worldspace position
-    // bc - bicubic tap,
-    // bl - bicubic & bilinear tap
-    //
-    // -- bc bc --
-    // bc bl bl bc
-    // bc bl bl bc
-    // -- bc bc --
-
-    /// Fetching previous viewZs and materialIDs
-    float2 gatherOrigin00 = (float2(bilinearOrigin) + float2(0.0, 0.0)) * gResourceSizeInvPrev;
-    float2 gatherOrigin10 = (float2(bilinearOrigin) + float2(2.0, 0.0)) * gResourceSizeInvPrev;
-    float2 gatherOrigin01 = (float2(bilinearOrigin) + float2(0.0, 2.0)) * gResourceSizeInvPrev;
-    float2 gatherOrigin11 = (float2(bilinearOrigin) + float2(2.0, 2.0)) * gResourceSizeInvPrev;
-    float4 prevViewZs00 = UnpackViewZ(gPrev_ViewZ.GatherRed(gNearestClamp, gatherOrigin00).wzxy);
-    float4 prevViewZs10 = UnpackViewZ(gPrev_ViewZ.GatherRed(gNearestClamp, gatherOrigin10).wzxy);
-    float4 prevViewZs01 = UnpackViewZ(gPrev_ViewZ.GatherRed(gNearestClamp, gatherOrigin01).wzxy);
-    float4 prevViewZs11 = UnpackViewZ(gPrev_ViewZ.GatherRed(gNearestClamp, gatherOrigin11).wzxy);
-    float4 prevMaterialIDs00 = gPrev_MateriallID.GatherRed(gNearestClamp, gatherOrigin00).wzxy * 255.0;
-    float4 prevMaterialIDs10 = gPrev_MateriallID.GatherRed(gNearestClamp, gatherOrigin10).wzxy * 255.0;
-    float4 prevMaterialIDs01 = gPrev_MateriallID.GatherRed(gNearestClamp, gatherOrigin01).wzxy * 255.0;
-    float4 prevMaterialIDs11 = gPrev_MateriallID.GatherRed(gNearestClamp, gatherOrigin11).wzxy * 255.0;
+    float2 gatherOrigin = (float2(bilinearOrigin) + 1.0) * gResourceSizeInvPrev;
+    float4 prevViewZs = UnpackViewZ(gPrev_ViewZ.GatherRed(gNearestClamp, gatherOrigin).wzxy);
+    float4 prevMaterialIDs = gPrev_MateriallID.GatherRed(gNearestClamp, gatherOrigin).wzxy * 255.0;
 
     // Calculating disocclusion threshold
     float pixelSize = PixelRadiusToWorld(gUnproject, gOrthoMode, 1.0, currentLinearZ);
@@ -110,44 +83,19 @@ float loadSurfaceMotionBasedPrevData(
     smbDisocclusionThreshold *= IsInScreenBilinear(bilinearOrigin, gRectSizePrev);
     smbDisocclusionThreshold -= NRD_EPS;
 
-    // Calculating validity of 12 bicubic taps, 4 of those are bilinear taps
     float3 prevViewPos = Geometry::AffineTransform(gWorldToViewPrev, prevWorldPos);
-    float3 planeDist0 = abs(prevViewZs00.yzw - prevViewPos.zzz);
-    float3 planeDist1 = abs(prevViewZs10.xzw - prevViewPos.zzz);
-    float3 planeDist2 = abs(prevViewZs01.xyw - prevViewPos.zzz);
-    float3 planeDist3 = abs(prevViewZs11.xyz - prevViewPos.zzz);
-    float3 tapsValid0 = step(planeDist0, smbDisocclusionThreshold.x);
-    float3 tapsValid1 = step(planeDist1, smbDisocclusionThreshold.y);
-    float3 tapsValid2 = step(planeDist2, smbDisocclusionThreshold.z);
-    float3 tapsValid3 = step(planeDist3, smbDisocclusionThreshold.w);
+    float4 bilinearTapsValid = step(abs(prevViewZs - prevViewPos.zzzz), smbDisocclusionThreshold);
+    float minMaterialID = min(gSpecMinMaterial, gDiffMinMaterial);
+    bilinearTapsValid *= CompareMaterials(currentMaterialID.xxxx, prevMaterialIDs, minMaterialID);
 
-    float minMaterialID = min(gSpecMinMaterial, gDiffMinMaterial); // TODO: separation is expensive
-    tapsValid0 *= CompareMaterials(currentMaterialID.xxx, prevMaterialIDs00.yzw, minMaterialID);
-    tapsValid1 *= CompareMaterials(currentMaterialID.xxx, prevMaterialIDs10.xzw, minMaterialID);
-    tapsValid2 *= CompareMaterials(currentMaterialID.xxx, prevMaterialIDs01.xyw, minMaterialID);
-    tapsValid3 *= CompareMaterials(currentMaterialID.xxx, prevMaterialIDs11.xyz, minMaterialID);
-
-    float bicubicFootprintValid = dot(tapsValid0 + tapsValid1 + tapsValid2 + tapsValid3, 1.0) > 11.5 ? 1.0 : 0.0;
-    float4 bilinearTapsValid = float4(tapsValid0.z, tapsValid1.y, tapsValid2.y, tapsValid3.x);
-
-    Filtering::Bilinear normalFilter;
-    normalFilter.weights = bilinearWeights;
-    float4 normalWeights = Filtering::GetBilinearCustomWeights(normalFilter, bilinearTapsValid);
-    float3 prevNormalFlat = 0.0;
+    float3 previousFrameNormal = Geometry::RotateVectorInverse(gWorldPrevToWorld, currentNormal);
     [unroll]
     for (uint tap = 0; tap < 4; ++tap)
     {
         int2 pos = bilinearOrigin + int2(tap & 1, tap >> 1);
-        prevNormalFlat += UnpackPrevNormalRoughness(gPrev_Normal_Roughness.Load(int3(pos, 0))).xyz * normalWeights[tap];
-    }
-    prevNormalFlat = Geometry::RotateVector(gWorldPrevToWorld, _NRD_SafeNormalize(prevNormalFlat));
-
-    // Reject backfacing history: if angle between current normal and previous normal is larger than 90 deg
-    [flatten]
-    if (dot(currentNormal, prevNormalFlat) < 0.0)
-    {
-        bilinearTapsValid = 0;
-        bicubicFootprintValid = 0;
+        float3 tapNormal = UnpackPrevNormalRoughness(gPrev_Normal_Roughness.Load(int3(pos, 0))).xyz;
+        float compatible = float(dot(previousFrameNormal, tapNormal) >= 0.5);
+        bilinearTapsValid[tap] *= compatible;
     }
 
     // Calculating bilinear weights in advance
@@ -155,7 +103,7 @@ float loadSurfaceMotionBasedPrevData(
     bilinear.weights = bilinearWeights;
     float4 bilinearCustomWeights = Filtering::GetBilinearCustomWeights(bilinear, float4(bilinearTapsValid.x, bilinearTapsValid.y, bilinearTapsValid.z, bilinearTapsValid.w));
 
-    bool useBicubic = (bicubicFootprintValid > 0);
+    bool useBicubic = false;
 
     // Fetching normal history
     BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights(
@@ -205,7 +153,6 @@ float loadSurfaceMotionBasedPrevData(
 #endif
 
     // Fitering more previous data that does not need bicubic
-    float2 gatherOrigin = (float2(bilinearOrigin) + 1.0) * gResourceSizeInvPrev;
     float4 prevHistoryLengths = gPrev_HistoryLength.GatherRed(gNearestClamp, gatherOrigin).wzxy;
     historyLength = 255.0 * BilinearWithCustomWeightsImmediateFloat(
         prevHistoryLengths.x,
@@ -220,8 +167,8 @@ float loadSurfaceMotionBasedPrevData(
     prevReflectionHitT = max(0.001, prevReflectionHitT);
 #endif
 
-    float reprojectionFound = (bicubicFootprintValid > 0) ? 2.0 : 1.0;
-    footprintQuality = (bicubicFootprintValid > 0) ? 1.0 : dot(bilinearCustomWeights, 1.0);
+    float reprojectionFound = 1.0;
+    footprintQuality = dot(bilinearCustomWeights, 1.0);
 
     [flatten]
     if (!any(bilinearTapsValid))
@@ -243,7 +190,6 @@ float loadVirtualMotionBasedPrevData(
     float hitDistOriginal,
     float3 currentViewVector,
     float3 prevWorldPos,
-    bool surfaceBicubicValid,
     float currentMaterialID,
     float2 prevUVSMB,
     float smbParallaxInPixelsMax,
@@ -306,6 +252,16 @@ float loadVirtualMotionBasedPrevData(
 
     bilinearTapsValid *= CompareMaterials(currentMaterialID.xxxx, prevMaterialIDs.xyzw, gSpecMinMaterial);
 
+    float4 previousNormalRoughness[4];
+    float3 previousFrameNormal = Geometry::RotateVectorInverse(gWorldPrevToWorld, currentNormal);
+    [unroll]
+    for (uint tap = 0; tap < 4; ++tap)
+    {
+        previousNormalRoughness[tap] = UnpackPrevNormalRoughness(
+            gPrev_Normal_Roughness.Load(int3(bilinearOrigin + int2(tap & 1, tap >> 1), 0)));
+        bilinearTapsValid[tap] *= float(dot(previousFrameNormal, previousNormalRoughness[tap].xyz) >= 0.5);
+    }
+
     // Applying reprojection
     prevSpecularIllumAnd2ndMoment = 0;
     prevSpecularResponsiveIllum = 0;
@@ -325,7 +281,7 @@ float loadVirtualMotionBasedPrevData(
         bilinear.weights = bilinearWeights;
         float4 bilinearCustomWeights = Filtering::GetBilinearCustomWeights(bilinear, float4(bilinearTapsValid.x, bilinearTapsValid.y, bilinearTapsValid.z, bilinearTapsValid.w));
 
-        bool useBicubic = (surfaceBicubicValid > 0) & all(bilinearTapsValid);
+        bool useBicubic = false;
 
         // Fetching normal virtual motion based specular history
         BicubicFilterNoCornersWithFallbackToBilinearFilterWithCustomWeights(
@@ -353,9 +309,11 @@ float loadVirtualMotionBasedPrevData(
         prevReflectionHitT = gPrev_SpecHitDist.SampleLevel(gLinearClamp, prevSampleUv * gResolutionScalePrev, 0).x;
         prevReflectionHitT = max(0.001, prevReflectionHitT);
 
-        float4 prevNormalRoughness = UnpackPrevNormalRoughness(gPrev_Normal_Roughness.SampleLevel(gLinearClamp, prevSampleUv * gResolutionScalePrev, 0));
+        float4 prevNormalRoughness = BilinearWithCustomWeightsImmediateFloat4(
+            previousNormalRoughness[0], previousNormalRoughness[1],
+            previousNormalRoughness[2], previousNormalRoughness[3], bilinearCustomWeights);
         prevNormal = prevNormalRoughness.xyz;
-        prevNormal = Geometry::RotateVector(gWorldPrevToWorld, prevNormal);
+        prevNormal = Geometry::RotateVector(gWorldPrevToWorld, _NRD_SafeNormalize(prevNormal));
         prevRoughness = prevNormalRoughness.w;
     }
     // Using all() marks entire virtual motion based specular history footprint
@@ -469,7 +427,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
     float hitTM1 = sharedNormalSpecHitT[sharedMemoryIndex.y][sharedMemoryIndex.x].a;
     float minHitDist3x3 = hitTM1 == 0.0 ? NRD_INF : hitTM1;
     float3 currentNormalAveraged = currentNormal;
-    float3 reprojectionNormal = currentNormal;
 
     [unroll]
     for (i = -1; i <= 1; i++)
@@ -485,13 +442,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
 
             minHitDist3x3 = min(minHitDist3x3, normalSpecHitT.a == 0.0 ? NRD_INF : normalSpecHitT.a);
             currentNormalAveraged += normalSpecHitT.rgb;
-            int2 samplePos = clamp(int2(pixelPos) + int2(i, j), 0, int2(gRectSize) - 1);
-            float sampleViewZ = sharedGuideViewZ[sharedMemoryIndex.y + j][sharedMemoryIndex.x + i];
-            float3 sampleWorldPos = GetCurrentWorldPosFromPixelPos(samplePos, sampleViewZ);
-            float planeDistance = abs(dot(currentNormal, sampleWorldPos - currentWorldPos));
-            if (sampleViewZ < gDenoisingRange && planeDistance <= max(gDepthThreshold * currentLinearZ, NRD_EPS)
-                && dot(currentNormal, normalSpecHitT.rgb) > 0.0)
-                reprojectionNormal += normalSpecHitT.rgb;
         }
     }
     currentNormalAveraged /= 9.0;
@@ -561,7 +511,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         prevWorldPos,
         prevUVSMB,
         currentLinearZ,
-        normalize(reprojectionNormal),
+        currentNormal,
     #if( NRD_SPEC )
         specularIllumination.a,
     #endif
@@ -821,7 +771,6 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
         hitDist,
         currentViewVector,
         prevWorldPos,
-        SMBReprojectionFound == 2.0 ? true : false,
         currentMaterialID,
         prevUVSMB,
         smbParallaxInPixelsMax,

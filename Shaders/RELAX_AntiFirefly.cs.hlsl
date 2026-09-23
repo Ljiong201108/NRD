@@ -125,7 +125,7 @@ void runRCRS(
             float3 sampleWorldPos = GetCurrentWorldPosFromPixelPos(samplePixel, sampleGuide.w);
             float planeDistance = abs(dot(centerGuide.xyz, sampleWorldPos - centerWorldPos));
             if (sampleGuide.w >= gDenoisingRange || planeDistance > max(gDepthThreshold * centerGuide.w, NRD_EPS)
-                || dot(centerGuide.xyz, sampleGuide.xyz) <= 0.0)
+                || dot(centerGuide.xyz, sampleGuide.xyz) < 0.5)
                 continue;
 
 #if( NRD_SPEC )

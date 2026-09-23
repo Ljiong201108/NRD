@@ -639,7 +639,7 @@ float GetDisocclusionThreshold( float disocclusionThreshold, float frustumSize, 
     uv01 *= invResourceSize.xyxy; \
     uv23 *= invResourceSize.xyxy; \
     uv4 *= invResourceSize; \
-    int3 bilinearOrigin = int3( centerPos, 0 );
+    int3 bilinearOrigin = int3( centerPos - 0.5, 0 );
 
 /*
 IMPORTANT:

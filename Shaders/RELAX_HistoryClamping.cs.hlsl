@@ -136,7 +136,7 @@ NRD_EXPORT void NRD_CS_MAIN( NRD_CS_MAIN_ARGS )
             float3 sampleWorldPos = GetCurrentWorldPosFromPixelPos(samplePixel, sampleViewZ);
             float planeDistance = abs(dot(centerGuide.xyz, sampleWorldPos - centerWorldPos));
             w *= float(planeDistance <= max(gDepthThreshold * centerViewZ, NRD_EPS));
-            w *= float(dot(centerGuide.xyz, sampleGuide.xyz) > 0.0);
+            w *= float(dot(centerGuide.xyz, sampleGuide.xyz) >= 0.5);
             w *= CompareMaterials(centerGuide.w, sampleGuide.w, min(gDiffMinMaterial, gSpecMinMaterial));
             if( w != 0.0 )
             {
